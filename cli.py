@@ -5,8 +5,7 @@ from generator import draft_script, generate_video
 import openai, sys, os
 import asyncio
 if sys.platform.startswith("win"):
-    loop = asyncio.ProactorEventLoop()
-    asyncio.set_event_loop(loop)
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 @click.group()
 def cli():
