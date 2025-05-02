@@ -14,8 +14,6 @@ Context and Assumptions:
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-from streamlit_folium import folium_static
-import folium
 
 # ========== Data Ingestion & ETL Placeholders ==========
 @st.cache_data
@@ -67,6 +65,7 @@ def build_dataset():
 # ========== Main App ==========
 
 def main():
+    # Page config must be first Streamlit call
     st.set_page_config(page_title="Solar Detective", layout="wide")
     st.title("🌞 Solar Detective: India's Solar Infrastructure")
     st.markdown("An AI-powered dashboard to explore and filter solar projects nationwide.")
@@ -90,7 +89,7 @@ def main():
         (float(df['capacity_mw'].min()), float(df['capacity_mw'].max()))
     )
 
-    # Filter data
+    # Apply filters
     filtered = df[
         (df['commissioning_year'].isin(selected_year)) &
         (df['type'].isin(selected_type)) &
@@ -102,31 +101,41 @@ def main():
     # Layout: map on left, table on right
     col1, col2 = st.columns((2, 1))
 
+    # Tooltip configuration
+    tooltip = {
+        "html": "<b>{project_name}</b><br/>Capacity: {capacity_mw} MW<br/>Developer: {developer}<br/>Year: {commissioning_year}",
+        "style": {"backgroundColor": "steelblue", "color": "white", "fontSize": "12px", "padding": "10px"}
+    }
+
     with col1:
         st.subheader("Interactive Map")
-        # PyDeck map with larger pins
         if not filtered.empty:
             layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=filtered,
                 get_position='[lon, lat]',
-                get_radius=5000,  # increased radius for better visibility
+                get_radius=7000,  # larger radius for visibility
                 pickable=True,
-                get_fill_color='[255, 165, 0, 160]'
+                get_fill_color='[255, 165, 0, 200]'
             )
             view_state = pdk.ViewState(
                 latitude=filtered['lat'].mean(),
                 longitude=filtered['lon'].mean(),
                 zoom=5
             )
-            st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
+            deck = pdk.Deck(
+                layers=[layer],
+                initial_view_state=view_state,
+                tooltip=tooltip
+            )
+            st.pydeck_chart(deck, use_container_width=True)
         else:
-            st.write("No projects match the selected filters.")
+            st.info("No projects match the selected filters.")
 
     with col2:
         st.subheader("Project Data")
         st.write(f"Total projects: {len(filtered)}")
-        st.dataframe(filtered)
+        st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
 
     # Export button
     st.download_button(
