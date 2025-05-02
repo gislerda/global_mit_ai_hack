@@ -1,49 +1,38 @@
-# solar_detective.py
+# solar_detective.py (v0.4.2)
 """
-Solar Detective – Prototype pipeline and dashboard for the
-“Mapping India’s Solar Infrastructure Using Agentic AI” challenge.
-
-Author: ChatGPT (OpenAI o3)
-Date: 2025‑05‑02 (patched)
-
-Changelog 2025‑05‑02
---------------------
-* **Fix dashboard crash** when DB rows → DataFrame – now builds via list‑of‑dicts so columns exist.
-* **Graceful empty‑DB guard** prints a hint and exits early.
-* **Row access** uses `row["latitude"]` to avoid attribute lookup edge‑cases.
-* **LangChain v0.2 import paths** switched to `langchain_community.*` (removes warnings).
-* Misc. typing + doc updates.
+Solar Detective – Agentic crawler & dashboard  
+Updated 2025‑05‑02 – adds optional `auto` parameter to `ingest()` and fixes
+the CLI traceback.
 """
 
-################################################################################
-# Stdlib & third‑party imports
-################################################################################
+from __future__ import annotations
 
+import concurrent.futures
+import json
+import logging
 import os
 import re
-import json
+import tempfile
 import time
-import requests
-import logging
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
-from bs4 import BeautifulSoup
-import pdfplumber
 import folium
-from folium.plugins import MarkerCluster
 import gradio as gr
-from sqlmodel import Field, SQLModel, Session, create_engine, select
+import pandas as pd
+import pdfplumber
+import requests
+from bs4 import BeautifulSoup
+from folium.plugins import MarkerCluster
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-# LangChain – community namespace (v0.2+)
-from langchain_community.chat_models import ChatOpenAI
-from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
-from langchain.agents import initialize_agent, AgentType
+from langchain.agents import AgentType, initialize_agent
 from langchain.tools import Tool
+from langchain_community.chat_models import ChatOpenAI
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper as DDS
 
 ################################################################################
-# Database schema
+# Database model
 ################################################################################
 
 class SolarProject(SQLModel, table=True):
@@ -52,241 +41,359 @@ class SolarProject(SQLModel, table=True):
     capacity_mw: Optional[float] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    state: Optional[str] = None
     developer: Optional[str] = None
     year: Optional[int] = None
-    project_type: Optional[str] = None  # Utility, Rooftop, Floating, Hybrid
-    cell_tech: Optional[str] = None     # e.g. c‑Si, CdTe …
+    project_type: Optional[str] = None
+    cell_tech: Optional[str] = None
     bifacial: Optional[bool] = None
     grid_conn: Optional[str] = None
     manufacturers: Optional[str] = None
     offtake: Optional[str] = None
     financing: Optional[str] = None
     dispatch_url: Optional[str] = None
-    raw_source: Optional[str] = None    # URL or file reference
+    raw_source: Optional[str] = None
+
 
 DB_PATH = "solar_projects.db"
-ENGINE = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+ENGINE = create_engine(f"sqlite:///{DB_PATH}")
 SQLModel.metadata.create_all(ENGINE)
 
 ################################################################################
-# Basic helpers
-################################################################################
+USER_AGENT = {"User-Agent": "solar-detective-bot"}
 
-def fetch_html(url: str) -> str:
-    logging.info(f"Fetching {url}")
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+
+def fetch(url: str, binary: bool = False):
+    logging.info(f"GET {url}")
+    r = requests.get(url, headers=USER_AGENT, timeout=30)
+    r.raise_for_status()
+    return r.content if binary else r.text
 
 
 def parse_capacity(text: str) -> Optional[float]:
-    m = re.search(r"([0-9]+(?:\\.[0-9]+)?)\\s*(MW|GW)", text, re.I)
+    m = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*(MW|GW)", text, re.I)
     if not m:
         return None
     val, unit = m.groups()
-    return float(val) * (1000 if unit.lower() == "gw" else 1)
+    return float(val.replace(",", ".")) * (1000 if unit.lower() == "gw" else 1)
+
+################################################################################
+# Simple geocode cache
+################################################################################
+
+GEOCACHE: Dict[str, Tuple[float, float]] = {}
 
 
-def geocode_location(place: str) -> Tuple[Optional[float], Optional[float]]:
+def geocode(place: str):
+    if place in GEOCACHE:
+        return GEOCACHE[place]
     try:
-        resp = requests.get(
+        r = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params=dict(q=place, format="json", limit=1),
-            headers={"User-Agent": "solar-detective-prototype"},
+            headers=USER_AGENT,
             timeout=10,
         )
-        data = resp.json()
-        if data:
-            return float(data[0]["lat"]), float(data[0]["lon"])
+        js = r.json()
+        if js:
+            lat, lon = float(js[0]["lat"]), float(js[0]["lon"])
+            GEOCACHE[place] = (lat, lon)
+            return lat, lon
     except Exception as e:
-        logging.warning(f"Geocoding failed for '{place}': {e}")
+        logging.warning(f"geocode fail {place}: {e}")
     return None, None
 
 ################################################################################
-# Source‑specific mini‑extractors (placeholder stubs)
+# Extractors
 ################################################################################
 
-MNRE_SOLAR_PARKS_URL = (
-    "https://mnre.gov.in/en/development-of-solar-parks-and-ultra-mega-solar-power-projects/"
-)
-SECI_TENDER_AWARD_URL = (
-    "https://www.seci.co.in/Bidder/view/tender/results/all-award/list/bidder"
-)
+MNRE_URL = "https://mnre.gov.in/en/development-of-solar-parks-and-ultra-mega-solar-power-projects/"
+SECI_URL = "https://www.seci.co.in/Bidder/view/tender/results/all-award/list/bidder"
+POSOCO_CSV = "https://posoco.in/wp-content/plugins/re-dashboard/data/solar_list.csv"
+NSEFI_MEMBERS = "https://www.nsefi.in/members"
+
+search = DDS()
 
 
-def discover_mnre_projects() -> List[SolarProject]:
-    html = fetch_html(MNRE_SOLAR_PARKS_URL)
-    soup = BeautifulSoup(html, "html.parser")
-    projects: List[SolarProject] = []
-    for row in soup.select("table tr"):
-        cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) < 3 or not re.search(r"MW|GW", " ".join(cells)):
+def extract_mnre():
+    soup = BeautifulSoup(fetch(MNRE_URL), "html.parser")
+    items = []
+    for blk in soup.select("div.accordion-item"):
+        txt = blk.get_text(" ", strip=True)
+        cap = parse_capacity(txt)
+        if not cap:
             continue
-        name = cells[0]
-        capacity = parse_capacity(" ".join(cells))
-        loc_text = cells[1]
-        lat, lon = geocode_location(loc_text + ", India")
-        projects.append(
+        name = txt.split("–", 1)[0].strip()
+        lat, lon = geocode(name + ", India")
+        items.append(
             SolarProject(
                 name=name,
-                capacity_mw=capacity,
+                capacity_mw=cap,
                 latitude=lat,
                 longitude=lon,
-                developer="N/A",
-                year=None,
+                developer="Various",
                 project_type="Utility",
-                raw_source=MNRE_SOLAR_PARKS_URL,
+                raw_source=MNRE_URL,
             )
         )
-    return projects
+    logging.info(f"MNRE {len(items)} rows")
+    return items
 
 
-def discover_seci_awards() -> List[SolarProject]:
-    html = fetch_html(SECI_TENDER_AWARD_URL)
-    soup = BeautifulSoup(html, "html.parser")
-    projects: List[SolarProject] = []
-    for row in soup.select("tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
-        if len(cells) < 5:
+def extract_seci():
+    soup = BeautifulSoup(fetch(SECI_URL), "html.parser")
+    items = []
+    for row in soup.select("table tr"):
+        t = [td.get_text(" ", strip=True) for td in row.find_all("td")]
+        if len(t) < 5:
             continue
-        name = cells[1]
-        capacity = parse_capacity(cells[4])
-        projects.append(
+        cap = parse_capacity(" ".join(t))
+        if not cap:
+            continue
+        items.append(
+            SolarProject(
+                name=t[1],
+                developer=t[2],
+                capacity_mw=cap,
+                project_type="Utility",
+                raw_source=SECI_URL,
+            )
+        )
+    logging.info(f"SECI {len(items)} rows")
+    return items
+
+
+def extract_posoco():
+    try:
+        csv = fetch(POSOCO_CSV)
+        df = pd.read_csv(pd.compat.StringIO(csv))
+    except Exception as e:
+        logging.warning(f"POSOCO fail {e}")
+        return []
+    items = []
+    for _, r in df.iterrows():
+        cap = parse_capacity(str(r.get("Capacity (MW)", "")))
+        lat, lon = geocode(f"{r['Plant']} {r['State']}, India")
+        items.append(
+            SolarProject(
+                name=r["Plant"],
+                state=r["State"],
+                capacity_mw=cap,
+                latitude=lat,
+                longitude=lon,
+                developer=r.get("Owner"),
+                raw_source=POSOCO_CSV,
+            )
+        )
+    logging.info(f"POSOCO {len(items)} rows")
+    return items
+
+
+def extract_nsefi():
+    soup = BeautifulSoup(fetch(NSEFI_MEMBERS), "html.parser")
+    items = []
+    for card in soup.select("div.member-info"):
+        txt = card.get_text(" ", strip=True)
+        cap = parse_capacity(txt)
+        name = txt.split(" ")[0]
+        if not cap:
+            continue
+        lat, lon = geocode(name + ", India")
+        items.append(
             SolarProject(
                 name=name,
-                capacity_mw=capacity,
-                latitude=None,
-                longitude=None,
-                developer=cells[2],
-                year=None,
-                project_type="Utility",
-                raw_source=SECI_TENDER_AWARD_URL,
+                developer=name,
+                capacity_mw=cap,
+                latitude=lat,
+                longitude=lon,
+                raw_source=NSEFI_MEMBERS,
             )
         )
-    return projects
+    logging.info(f"NSEFI {len(items)} rows")
+    return items
 
-SOURCE_FUNCS = {
-    "mnre": discover_mnre_projects,
-    "seci": discover_seci_awards,
+
+PDF_PATTERNS = {
+    "Adani": r"https://www\.adanigreenenergy\.com/[^\s]+\.pdf",
+    "ReNew": r"https://www\.renew\.com/[^\s]+\.pdf",
+    "Tata": r"https://www\.tatapower\.com/[^\s]+\.pdf",
+    "Azure": r"https://investors\.azurepower\.com/[^\s]+\.pdf",
+}
+
+
+def discover_pdfs():
+    urls = []
+    for key, p in PDF_PATTERNS.items():
+        res = search.run(f"{key} investor presentation solar MW filetype:pdf")
+        urls += re.findall(p, res)
+    return list(dict.fromkeys(urls))  # dedupe while preserving order
+
+
+def extract_pdf(url: str):
+    rows = []
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(fetch(url, binary=True))
+        path = tmp.name
+    with pdfplumber.open(path) as pdf:
+        txt = "\n".join(p.extract_text() or "" for p in pdf.pages)
+    os.unlink(path)
+    for m in re.finditer(r"([A-Za-z \-]+?)\s+(\d+[,.]?\d*)\s*MW", txt):
+        n, v = m.groups()
+        cap = parse_capacity(v + " MW")
+        rows.append(
+            SolarProject(
+                name=n.strip(),
+                capacity_mw=cap,
+                developer=url.split("/")[2],
+                raw_source=url,
+            )
+        )
+    return rows
+
+
+def discover_datasets():
+    html = search.run("India solar project locations filetype:csv site:github.com")
+    return re.findall(r'https://raw\.githubusercontent\.com/[^"\s]+\.csv', html)
+
+
+def extract_dataset(url: str):
+    try:
+        df = pd.read_csv(url)
+    except Exception:
+        return []
+    cols = [c.lower() for c in df.columns]
+    if not {"name", "capacity", "lat", "lon"}.issubset(cols):
+        return []
+    items = []
+    for _, r in df.iterrows():
+        items.append(
+            SolarProject(
+                name=str(r["name"]),
+                capacity_mw=float(r["capacity"]),
+                latitude=float(r["lat"]),
+                longitude=float(r["lon"]),
+                raw_source=url,
+            )
+        )
+    return items
+
+
+EXTRACTORS = {
+    "mnre": extract_mnre,
+    "seci": extract_seci,
+    "posoco": extract_posoco,
+    "nsefi": extract_nsefi,
 }
 
 ################################################################################
-# LangChain autonomous agent (optional)
+# Ingestion
 ################################################################################
 
-def build_agent():
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
-    search = DuckDuckGoSearchAPIWrapper()
-    tools = [
-        Tool(name="duckduckgo", func=lambda q: search.run(q), description="Search the internet"),
-        Tool(name="fetch_html", func=fetch_html, description="GET raw HTML"),
-    ]
-    return initialize_agent(tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=True)
 
-################################################################################
-# Ingestion pipeline
-################################################################################
-
-def ingest(sources: List[str]):
+def ingest(sources: List[str], auto: bool = False) -> None:
+    """
+    Ingest data for the given extractor keys.
+    If *auto* is True, the function also runs the slow PDF and GitHub discovery
+    pipelines.
+    """
     with Session(ENGINE) as sess:
-        for src in sources:
-            extractor = SOURCE_FUNCS.get(src)
-            if not extractor:
-                logging.warning(f"Unknown source '{src}', skipping.")
-                continue
-            for project in extractor():
-                exists = sess.exec(select(SolarProject).where(SolarProject.name == project.name)).first()
-                if not exists:
-                    sess.add(project)
+        new = 0
+
+        # built‑in extractors
+        for s in sources:
+            for p in EXTRACTORS[s]():
+                if not sess.exec(select(SolarProject).where(SolarProject.name == p.name)).first():
+                    sess.add(p)
+                    new += 1
+
+        # optional web‑discovery
+        if auto:
+            for url in discover_pdfs():
+                for p in extract_pdf(url):
+                    if not sess.exec(select(SolarProject).where(SolarProject.name == p.name)).first():
+                        sess.add(p)
+                        new += 1
+
+            for csv in discover_datasets():
+                for p in extract_dataset(csv):
+                    if not sess.exec(select(SolarProject).where(SolarProject.name == p.name)).first():
+                        sess.add(p)
+                        new += 1
+
         sess.commit()
+        logging.info(f"ingested {new} new rows")
 
 ################################################################################
-# Dashboard helpers
+# Dashboard
 ################################################################################
 
-def make_popup_html(row) -> str:
-    lines = [
-        f"<b>Name:</b> {row['name']}",
-        f"<b>Capacity:</b> {row['capacity_mw']} MW" if pd.notna(row['capacity_mw']) else "",
-        f"<b>Developer:</b> {row['developer']}" if row.get('developer') else "",
-        f"<b>Year:</b> {row['year']}" if pd.notna(row['year']) else "",
-        f"<b>Type:</b> {row['project_type']}" if row.get('project_type') else "",
-        f"<small>Source: {row['raw_source']}</small>",
-    ]
-    return "<br>".join([l for l in lines if l])
+
+def popup(r):
+    return f"<b>{r['name']}</b><br>{r.get('capacity_mw','?')} MW"
 
 
-def build_map(df: pd.DataFrame) -> str:
-    m = folium.Map(location=[22.5937, 78.9629], zoom_start=5)
-    cluster = MarkerCluster().add_to(m)
-    for _, r in df.dropna(subset=["latitude", "longitude"]).iterrows():
-        folium.Marker(
-            location=[r["latitude"], r["longitude"]],
-            popup=folium.Popup(make_popup_html(r), max_width=250),
-        ).add_to(cluster)
+def build_map(df):
+    m = folium.Map(location=[22.6, 78.9], zoom_start=5)
+    cl = MarkerCluster().add_to(m)
+    for _, r in df.iterrows():
+        lat = r.get("latitude") or 0
+        lon = r.get("longitude") or 0
+        folium.Marker([lat, lon], popup=popup(r)).add_to(cl)
     return m._repr_html_()
 
-################################################################################
-# Dashboard entry point
-################################################################################
 
-def launch_dashboard():
-    with Session(ENGINE) as sess:
-        rows = sess.exec(select(SolarProject)).all()
-        df = pd.DataFrame([p.dict() for p in rows])
+def dashboard():
+    with Session(ENGINE) as s:
+        df = pd.DataFrame([p.dict() for p in s.exec(select(SolarProject)).all()])
 
     if df.empty:
-        print("⚠️  Database is empty – run `python solar_detective.py ingest` first.")
+        print("No data – run ingest first")
         return
 
-    def update(capacity, year, ptype):
-        filtered = df.copy()
-        if capacity:
-            filtered = filtered[filtered["capacity_mw"] >= capacity]
-        if year:
-            if "year" in filtered.columns:
-                filtered = filtered[filtered["year"].fillna(0).astype(int) >= year]
-        if ptype != "Any":
-            filtered = filtered[filtered["project_type"] == ptype]
-        return build_map(filtered), filtered
+    def filt(cap):
+        d = df[df["capacity_mw"] >= cap]
+        return build_map(d), d
 
-    with gr.Blocks() as demo:
-        gr.Markdown("# 🕵️‍♂️ Solar Detective – India Solar Project Map")
-        with gr.Row():
-            capacity = gr.Slider(minimum=0, maximum=2000, value=0, label="Min Capacity (MW)")
-            year = gr.Slider(minimum=2000, maximum=2025, value=2000, label="From Year")
-            ptype = gr.Dropdown(choices=["Any", "Utility", "Rooftop", "Floating", "Hybrid"], value="Any", label="Project Type")
-        map_html = gr.HTML()
-        table = gr.Dataframe(interactive=False)
-
-        for ctl in (capacity, year, ptype):
-            ctl.change(update, [capacity, year, ptype], [map_html, table])
-
-        # initial render
-        map_html.value, table.value = update(0, 2000, "Any")
-    demo.launch()
+    with gr.Blocks() as app:
+        gr.Markdown("# Solar Detective Map")
+        cap = gr.Slider(0, 2000, 0, label="Min MW")
+        html = gr.HTML()
+        tbl = gr.Dataframe()
+        cap.change(filt, cap, [html, tbl])
+        html.value, tbl.value = filt(0)
+    app.launch()
 
 ################################################################################
-# CLI driver
+# CLI
 ################################################################################
 
 if __name__ == "__main__":
     import argparse
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
 
-    parser = argparse.ArgumentParser(description="Solar Detective prototype")
-    sub = parser.add_subparsers(dest="cmd")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    p_ing = sub.add_parser("ingest", help="Ingest data from sources")
-    p_ing.add_argument("--source", "-s", action="append", default=["mnre", "seci"], help="Source key(s)")
+    ap = argparse.ArgumentParser("solar_detective")
+    sub = ap.add_subparsers(dest="cmd")
 
-    sub.add_parser("dashboard", help="Launch Gradio dashboard")
+    p_ing = sub.add_parser("ingest")
+    p_ing.add_argument("--auto", action="store_true", help="Also run PDF and GitHub discovery")
+    p_ing.add_argument(
+        "-s",
+        "--source",
+        action="append",
+        choices=list(EXTRACTORS) + ["all"],
+        default=["all"],
+        help="Extractors to run (default: all)",
+    )
 
-    args = parser.parse_args()
+    sub.add_parser("dashboard")
 
-    if args.cmd == "ingest":
-        ingest(args.source)
-    elif args.cmd == "dashboard":
-        launch_dashboard()
+    ns = ap.parse_args()
+
+    if ns.cmd == "ingest":
+        srcs = list(EXTRACTORS) if "all" in ns.source else ns.source
+        ingest(srcs, auto=ns.auto)
+    elif ns.cmd == "dashboard":
+        dashboard()
     else:
-        parser.print_help()
+        ap.print_help()
