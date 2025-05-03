@@ -4,14 +4,13 @@ import traceback
 try:
     import bpy
     import bmesh
-    from mathutils import Vector
-    from math import pi
+    from math import pi, sin, cos
     
     def clear_scene():
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
     
-    def create_material(name, color, metallic=1.0, roughness=0.25):
+    def create_material(name, color, metallic=1.0, roughness=0.3):
         mat = bpy.data.materials.new(name)
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
@@ -25,225 +24,277 @@ try:
         return mat
     
     def create_gem_material():
-        # Emerald-like: green and refractive
-        mat = bpy.data.materials.new("Emerald")
+        mat = bpy.data.materials.new("Diamond")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
             if bsdf.inputs.get("Base Color"):
-                bsdf.inputs["Base Color"].default_value = (0.08, 0.8, 0.3, 1.0)
+                bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
             if bsdf.inputs.get("Metallic"):
                 bsdf.inputs["Metallic"].default_value = 0.0
             if bsdf.inputs.get("Roughness"):
-                bsdf.inputs["Roughness"].default_value = 0.07
-            if bsdf.inputs.get("Alpha"):
-                bsdf.inputs["Alpha"].default_value = 1.0
+                bsdf.inputs["Roughness"].default_value = 0.02
             if bsdf.inputs.get("Emission"):
-                bsdf.inputs["Emission"].default_value = (0.0, 0.22, 0.08, 1.0)
+                bsdf.inputs["Emission"].default_value = (1.0, 1.0, 1.0, 1.0)
         return mat
     
-    def create_flat_band_ring(outer_radius=1.0, width=0.45, thickness=0.2, bar_gap=0.23, bar_height=0.11):
-        """
-        Returns a tuple: (ring_band_obj, [upper_bar_obj, lower_bar_obj])
-        Band shape: wide, flat; splits on top into two bars.
-        """
-        # 1. Main Band Body (90% of circumference), with flat sides
-        bm = bmesh.new()
-        # Create a cross-section (rectangle) for the flat band
-        verts2d = [
-            Vector((outer_radius - thickness, -width/2)),
-            Vector((outer_radius, -width/2)),
-            Vector((outer_radius, width/2)),
-            Vector((outer_radius - thickness, width/2)),
-        ]
-        # Sweep this 340 degrees, leaving 40-degree gap for the "split bars"
-        arc_res = 128
-        arc_angle = 320/360*pi*2  # ~320 deg to leave wide top gap for split
-        step = arc_angle / arc_res
-        center = Vector((0,0,0))
-        ring_verts = []
-        for i in range(arc_res+1):
-            phi = -pi/2 + i * step  # Start at bottom
-            rot = Vector((0,0,1)).rotation_difference(Vector((1,0,0))).to_matrix()
-            vset = []
-            for v in verts2d:
-                local = Vector((v.x * (cos := bpy.app.driver_namespace.setdefault('cos', __import__('math').cos))(phi), v.x * (__import__('math').sin)(phi), v.y))
-                vset.append(bm.verts.new(local))
-            for prev, curr in zip(vset, vset[1:]+vset[:1]):
-                pass  # just to ensure bm.verts.new
-            ring_verts.append(vset)
-        # Face sides of the band
-        for i in range(arc_res):
-            for j in range(4):
-                v0 = ring_verts[i][j]
-                v1 = ring_verts[i][(j+1)%4]
-                v2 = ring_verts[i+1][(j+1)%4]
-                v3 = ring_verts[i+1][j]
-                bm.faces.new([v0, v1, v2, v3])
-        band_mesh = bpy.data.meshes.new("FlatBandRing")
-        bm.to_mesh(band_mesh)
-        band_obj = bpy.data.objects.new("GoldBand", band_mesh)
-        bpy.context.collection.objects.link(band_obj)
-        bm.free()
-        
-        # 2. Two Parallel "Bars" that split and arch across the top gap
-        bar_len = bar_gap + 0.21
-        bar_y = width/2 - bar_height/2
-        bar_radius = outer_radius - thickness/2         # Midpoint of the band, so bars rest nicely on band
-        bar_res = 32
-        bars = []
-        for sign in (+1, -1):
-            # Each bar is a narrow rectangular prism swept in an arc across the gap
-            bar_bm = bmesh.new()
-            arc_start = pi/2 - (bar_gap/2)/bar_radius
-            arc_end   = pi/2 + (bar_gap/2)/bar_radius
-            # Slightly longer arc for each bar
-            arc_start -= 0.06
-            arc_end   += 0.06
-            for seg in range(bar_res+1):
-                t = seg / bar_res
-                phi = arc_start * (1-t) + arc_end * t
-                cx = bar_radius * bpy.app.driver_namespace.setdefault('cos', __import__('math').cos)(phi)
-                cz = bar_radius * (__import__('math').sin)(phi)
-                offset = sign * bar_y
-                p0 = bar_bm.verts.new((cx, offset-bar_height/2, cz))
-                p1 = bar_bm.verts.new((cx, offset+bar_height/2, cz))
-            for seg in range(bar_res):
-                v00 = bar_bm.verts[seg*2]
-                v01 = bar_bm.verts[seg*2+1]
-                v10 = bar_bm.verts[(seg+1)*2]
-                v11 = bar_bm.verts[(seg+1)*2+1]
-                bar_bm.faces.new([v00, v01, v11, v10])
-            # Cap faces
-            bar_bm.faces.new([bar_bm.verts[0], bar_bm.verts[1], bar_bm.verts[-1], bar_bm.verts[-2]])
-            bar_mesh = bpy.data.meshes.new(f"UpperBar_{sign}")
-            bar_bm.to_mesh(bar_mesh)
-            bar_obj = bpy.data.objects.new(f"Bar_{'Upper' if sign>0 else 'Lower'}", bar_mesh)
-            bpy.context.collection.objects.link(bar_obj)
-            bar_bm.free()
-            bars.append(bar_obj)
-        return band_obj, bars
+    def band_profile(thickness_base, thickness_top, width):
+        verts = []
+        segs = 8
+        for i in range(segs):
+            t = i / (segs - 1)
+            y = (t - 0.5) * width
+            thickness = (1-t)*thickness_base + t*thickness_top
+            verts.append((0, y, -thickness/2))
+            verts.append((0, y, thickness/2))
+        return verts
     
-    def create_emerald_cut_gem(center, gem_size=(0.22, 0.13, 0.10)):
-        """
-        Make a simplified emerald-cut (rectangular with chamfered corners & table).
-        center: (x, y, z)
-        gem_size: (x, y, z) tuple for length, width, depth
-        """
-        lx, ly, lz = gem_size
-        # Basic rectangular prism with small corner cut (bevel)
+    def swept_curve(radius=1.0, split_angle=pi/2, segs=64):
+        # Returns two lists of points for the split strands
+        a0 = pi/2 + split_angle/2
+        a1 = pi/2 - split_angle/2
+        arc1 = []
+        arc2 = []
+        for i in range(segs+1):
+            t = i / segs
+            a_top = (1-t)*a0 + t*pi*1.5 # go down to base at -Y
+            a_bot = (1-t)*a1 + t*pi*1.5
+            r_top = radius - 0.015 * t
+            r_bot = radius - 0.015 * t
+            arc1.append((r_top*cos(a_top), 0, r_top*sin(a_top)))
+            arc2.append((r_bot*cos(a_bot), 0, r_bot*sin(a_bot)))
+        return arc1, arc2
+    
+    def create_split_band_ring():
+        # Parameters
+        ring_radius = 1.0
+        band_width = 0.32         # width between outer faces of band (XZ plane, vertical ring width)
+        thickness_base = 0.23     # thickness at ring shank (thickest)
+        thickness_top = 0.13      # thickness at stone
+        
+        split_angle = pi/2 * 0.85 /* strands start split over ~77deg */
+    
+        arc1, arc2 = swept_curve(ring_radius, split_angle, segs=80)
+        
+        def profile_verts(a, t):
+            # Cross-section is oval at each point, becomes thinner at top
+            thickness = (1-t)*thickness_base + t*thickness_top
+            width = (1-t)*band_width*1.08 + t*band_width*0.65
+            ring_normal = (cos(a), 0, sin(a))
+            ring_binormal = (0, 1, 0)
+            # 8 verts, distributed along binormal, thickness in normal
+            vs = []
+            for j in range(-3, 4+1):
+                y = (j/4) * width/2
+                for s in [-1,1]:
+                    pt = (
+                        s*thickness/2*ring_normal[0] + 0*ring_binormal[0] + y*ring_binormal[0],
+                        s*thickness/2*ring_normal[1] + 0*ring_binormal[1] + y*ring_binormal[1],
+                        s*thickness/2*ring_normal[2] + 0*ring_binormal[2] + y*ring_binormal[2]
+                    )
+                    vs.append(pt)
+            return vs
+    
+        # Prep BMesh for curve sweep
         bm = bmesh.new()
-        # Start with a cube
-        bmesh.ops.create_cube(bm, size=1.0)
-        # Scale to shape
-        scale_mat = (
-            (lx/2,   0,    0),
-            (0,   ly/2,    0),
-            (0,     0,  lz/2)
-        )
-        for v in bm.verts:
-            v.co = Vector((v.co[0]*lx/2, v.co[1]*ly/2, v.co[2]*lz/2))
-        # Chamfer (bevel) the 8 cube corners, and optionally top/bottom edges
-        geom = [v for v in bm.verts]
-        bmesh.ops.bevel(bm, geom=geom, offset=min(lx, ly, lz)*0.12, segments=3, profile=0.5, affect='VERTICES')
-        # Table: flatten top slightly and shrink
-        top_verts = [v for v in bm.verts if abs(v.co[2] - lz/2)<0.03]
-        for v in top_verts:
-            v.co.xy *= 0.78
-            v.co[2] = lz/2 + 0.004
-        gem_mesh = bpy.data.meshes.new("EmeraldGem")
-        bm.to_mesh(gem_mesh)
+        nsegs = len(arc1)
+        prof_pts = 7*2
+        prev_verts_1 = []
+        prev_verts_2 = []
+    
+        for i in range(nsegs):
+            t = i / (nsegs-1)
+            a1 = pi/2 + split_angle/2*(1-t)
+            a2 = pi/2 - split_angle/2*(1-t)
+            # For both strands (upper and lower)
+            v1 = arc1[i]
+            v2 = arc2[i]
+            mat = (
+                # Matrix: place section at proper spot and orientation (XZ plane tangent)
+                # here: keep ring in XZ, y=0
+                )
+            # Place profile oriented with radial normal
+            pv1s = []
+            pv2s = []
+            pf1 = profile_verts(a1, t)
+            pf2 = profile_verts(a2, t)
+            # The 14 verts of this profile
+            for pt in pf1:
+                pv = bm.verts.new((v1[0]+pt[0], v1[1]+pt[1], v1[2]+pt[2]))
+                pv1s.append(pv)
+            for pt in pf2:
+                pv = bm.verts.new((v2[0]+pt[0], v2[1]+pt[1], v2[2]+pt[2]))
+                pv2s.append(pv)
+    
+            if i > 0:
+                # Create faces for previous profile to this one
+                for j in range(prof_pts):
+                    v00 = prev_verts_1[j]
+                    v01 = prev_verts_1[(j+1)%prof_pts]
+                    v10 = pv1s[j]
+                    v11 = pv1s[(j+1)%prof_pts]
+                    bm.faces.new([v00, v10, v11, v01])
+                    v00 = prev_verts_2[j]
+                    v01 = prev_verts_2[(j+1)%prof_pts]
+                    v10 = pv2s[j]
+                    v11 = pv2s[(j+1)%prof_pts]
+                    bm.faces.new([v00, v01, v11, v10])
+            prev_verts_1 = pv1s
+            prev_verts_2 = pv2s
+    
+        # At the very top, connect the two tops across
+        for i in range(prof_pts):
+            v1 = prev_verts_1[i]
+            v2 = prev_verts_2[i]
+            v1p = prev_verts_1[(i+1)%prof_pts]
+            v2p = prev_verts_2[(i+1)%prof_pts]
+            bm.faces.new([v1, v2, v2p, v1p])
+    
+        # Mesh object
+        mb = bpy.data.meshes.new("GoldRing")
+        bm.to_mesh(mb)
         bm.free()
-        gem_obj = bpy.data.objects.new("Emerald", gem_mesh)
+        ring_obj = bpy.data.objects.new("GoldRing", mb)
+        bpy.context.collection.objects.link(ring_obj)
+    
+        gold = create_material("Gold", (1.0, 0.85, 0.3))
+        if len(ring_obj.data.materials) == 0:
+            ring_obj.data.materials.append(gold)
+        else:
+            ring_obj.data.materials[0] = gold
+        ring_obj.select_set(True)
+        bpy.context.view_layer.objects.active = ring_obj
+    
+        # Set correct orientation (XZ ring, top at (0, 0, 0))
+        ring_obj.location = (0, 0, -ring_radius)
+        ring_obj.rotation_euler = (pi/2, 0, 0)
+        ring_obj.rotation_mode = 'XYZ'
+    
+        return ring_obj
+    
+    def create_oval_gem(center=(0, 0, 0.0), rx=0.12, rz=0.17, seg_main=56):
+        # Generate an approximated brilliant oval with vertical facet girdle and a peaked pavilion
+        bm = bmesh.new()
+    
+        n_row = 7
+        top = bm.verts.new((0, 0, rz*1.07))
+        bottom = bm.verts.new((0, 0, -rz*0.67))
+        # girdle (thickest and widest oval)
+        girdle = []
+        for i in range(seg_main):
+            a = (2*pi*i)/seg_main
+            x = rx * cos(a)
+            y = rx*0.86 * sin(a)
+            z = 0
+            v = bm.verts.new((x, y, z))
+            girdle.append(v)
+        # crown (top facets)
+        crown_row = []
+        for i in range(seg_main):
+            a = (2*pi*i)/seg_main
+            x = rx*0.91 * cos(a)
+            y = rx*0.83 * sin(a)
+            z = rz*0.42
+            v = bm.verts.new((x, y, z))
+            crown_row.append(v)
+            # Top to crown row
+            bm.faces.new([top, crown_row[i], crown_row[(i+1)%seg_main]])
+        # Crown facets
+        for i in range(seg_main):
+            bm.faces.new([crown_row[i], girdle[i], girdle[(i+1)%seg_main], crown_row[(i+1)%seg_main]])
+        # Girdle to pavilion (bottom peak)
+        for i in range(seg_main):
+            bm.faces.new([girdle[i], bottom, girdle[(i+1)%seg_main]])
+        mb = bpy.data.meshes.new("OvalGem")
+        bm.to_mesh(mb)
+        bm.free()
+        gem_obj = bpy.data.objects.new("OvalGem", mb)
         gem_obj.location = center
         bpy.context.collection.objects.link(gem_obj)
+    
+        gem_mat = create_gem_material()
+        if len(gem_obj.data.materials) == 0:
+            gem_obj.data.materials.append(gem_mat)
+        else:
+            gem_obj.data.materials[0] = gem_mat
         return gem_obj
     
-    def create_bezel_caps(gem_obj, gem_size, bar_objs, band_outer_radius, bar_offset=0.14, thickness=0.024):
-        """
-        Create two end bezels that 'cap' the gemstone at each end, integrating with parallel bars.
-        They're simple rectangular bridges with a little width to overlap the gem edges.
-        """
-        lx, ly, lz = gem_size
-        bezels = []
-        for sign in (-1, +1):
-            cap = bpy.data.meshes.new(f"BezelCap_{sign}")
-            bm = bmesh.new()
-            # Rectangular block: slightly wider than gem facet, about band thickness
-            bx = lx*0.17
-            by = ly*1.13
-            bz = thickness
-            x = sign*(lx/2 + bx/2 - 0.005)
-            v0 = bm.verts.new((x-bx/2, -by/2, -bz/2))
-            v1 = bm.verts.new((x+bx/2, -by/2, -bz/2))
-            v2 = bm.verts.new((x+bx/2,  by/2, -bz/2))
-            v3 = bm.verts.new((x-bx/2,  by/2, -bz/2))
-            v4 = bm.verts.new((x-bx/2, -by/2,  bz/2))
-            v5 = bm.verts.new((x+bx/2, -by/2,  bz/2))
-            v6 = bm.verts.new((x+bx/2,  by/2,  bz/2))
-            v7 = bm.verts.new((x-bx/2,  by/2,  bz/2))
-            bm.faces.new([v0, v1, v2, v3])
-            bm.faces.new([v4, v5, v6, v7])
-            bm.faces.new([v0, v4, v7, v3])
-            bm.faces.new([v1, v5, v6, v2])
-            bm.faces.new([v3, v2, v6, v7])
-            bm.faces.new([v0, v1, v5, v4])
-            cap_mesh = cap
-            bm.to_mesh(cap_mesh)
-            bm.free()
-            cap_obj = bpy.data.objects.new(f"Bezel_{'Left' if sign<0 else 'Right'}", cap_mesh)
-            # Place at correct position (use gem's loc as center reference)
-            cap_obj.location = (
-                gem_obj.location[0] + sign*(lx/2 - 0.002),
-                gem_obj.location[1],
-                gem_obj.location[2]
+    def create_prongs(ring_radius=1.0, gem_rx=0.12, gem_rz=0.17, nprongs=4):
+        # Prongs are gently flowing posts up from the split band toward the oval edges in X
+        # Place two prongs along +X/-X, two at intermediate ~45deg, symmetrical
+        prong_objs = []
+        z_gem = ring_radius + gem_rz - 0.015
+        angles = [0, pi/2, pi, 3*pi/2]
+        offsets = []
+        # For a natural split-band design, use prong roots tight to strand's top
+        tip_dist = gem_rx*0.90
+        for i in range(nprongs):
+            a = angles[i]
+            x = tip_dist * cos(a)
+            y = tip_dist * sin(a) * 0.78
+            z = z_gem + (sin(a)*0.03)
+            offsets.append((x, y, z))
+        root_dist_band = ring_radius-0.03
+        for i in range(nprongs):
+            a = angles[i]
+            root_x = root_dist_band * cos(a)
+            root_y = root_dist_band * sin(a) * 0.82
+            root_z = ring_radius + 0.02
+            tip = offsets[i]
+            root = (root_x, root_y, root_z)
+            Dx = tip[0] - root[0]
+            Dy = tip[1] - root[1]
+            Dz = tip[2] - root[2]
+            length = (Dx**2 + Dy**2 + Dz**2) ** 0.5
+            # Create prong as gently curved cylinder toward tip
+            bpy.ops.mesh.primitive_cylinder_add(
+                vertices=12,
+                radius=0.018,
+                depth=length,
+                location=((root[0]+tip[0])/2, (root[1]+tip[1])/2, (root[2]+tip[2])/2)
             )
-            bpy.context.collection.objects.link(cap_obj)
-            bezels.append(cap_obj)
-        return bezels
+            prong = bpy.context.active_object
+            prong.name = f"Prong_{i+1}"
+            # Orient cylinder to the vector (Dx, Dy, Dz)
+            from mathutils import Vector
+            direction = Vector((Dx, Dy, Dz)).normalized()
+            up = Vector((0,0,1))
+            if direction.dot(up) < 0.99999:
+                axis = up.cross(direction)
+                angle = up.angle(direction)
+                prong.rotation_mode = 'AXIS_ANGLE'
+                prong.rotation_axis_angle[0] = angle
+                prong.rotation_axis_angle[1] = axis[0]; prong.rotation_axis_angle[2] = axis[1]; prong.rotation_axis_angle[3] = axis[2]
+            else:
+                prong.rotation_mode = 'XYZ'
+                prong.rotation_euler = (0,0,0)
+            prong_objs.append(prong)
+        gold = create_material("Gold", (1.0, 0.85, 0.3))
+        for prong in prong_objs:
+            if len(prong.data.materials) == 0:
+                prong.data.materials.append(gold)
+            else:
+                prong.data.materials[0] = gold
+        return prong_objs
     
     def main():
         clear_scene()
-        
-        OUTER_RADIUS = 1.0
-        BAND_WIDTH = 0.42         # Distance from lower to upper band edge
-        BAND_THICKNESS = 0.21     # Side-wall to out-wall thickness
-        BAR_GAP = 0.25            # Distance between bars at split
-        BAR_HEIGHT = 0.12
-        GOLD_COL = (1.0, 0.85, 0.3)
-    
-        band_obj, bars = create_flat_band_ring(outer_radius=OUTER_RADIUS, width=BAND_WIDTH, thickness=BAND_THICKNESS, bar_gap=BAR_GAP, bar_height=BAR_HEIGHT)
-        band_obj.location = (0, 0, 0)
-        gold = create_material("Gold", GOLD_COL, metallic=1.0, roughness=0.19)
-        for o in [band_obj] + bars:
-            if len(o.data.materials):
-                o.data.materials[0] = gold
-            else:
-                o.data.materials.append(gold)
-    
-        # Gem & placement
-        GEM_SIZE = (0.22, 0.13, 0.10)
-        # Center of gemstone: just above ring edge, between bar arches
-        # Z: sit nicely above the ring, bar centers near 0, so offset up by half ring thickness + half gem height
-        gem_z = OUTER_RADIUS - BAND_THICKNESS/2 + GEM_SIZE[2]/2 + 0.015
-        gem_obj = create_emerald_cut_gem(center=(0, 0, gem_z), gem_size=GEM_SIZE)
-        emerald_mat = create_gem_material()
-        gem_obj.data.materials.append(emerald_mat)
-    
-        # Bezel/Setting caps
-        bezels = create_bezel_caps(gem_obj, GEM_SIZE, bars, band_outer_radius=OUTER_RADIUS, bar_offset=BAR_GAP/2, thickness=0.024)
-        for cap in bezels:
-            if len(cap.data.materials):
-                cap.data.materials[0] = gold
-            else:
-                cap.data.materials.append(gold)
-    
-        # Orient everything in XZ
-        for obj in [band_obj, gem_obj] + bars + bezels:
-            obj.rotation_mode = 'XYZ'
-            obj.rotation_euler = (pi/2, 0, 0)
-            # Move so the outer edge is at z=0 (top of finger @ 0)
-            obj.location[2] -= OUTER_RADIUS
+        ring_obj = create_split_band_ring()
+        ring_radius = 1.0
+        gem_rx, gem_rz = 0.12, 0.17
+        # Place diamond so its base sits just above ring top at origin (0,0,0)
+        gem_z = ring_radius + gem_rz - 0.022
+        gem_obj = create_oval_gem(center=(0, 0, gem_z), rx=gem_rx, rz=gem_rz, seg_main=56)
+        create_prongs(ring_radius=ring_radius, gem_rx=gem_rx, gem_rz=gem_rz, nprongs=4)
+        # Optional: set shade smooth
+        for obj in bpy.context.collection.objects:
+            if obj.type == 'MESH':
+                try:
+                    obj.select_set(True)
+                    bpy.context.view_layer.objects.active = obj
+                    bpy.ops.object.shade_smooth()
+                except Exception as e:
+                    pass
     
     main()
     

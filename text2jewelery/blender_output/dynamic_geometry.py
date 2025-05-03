@@ -3,155 +3,172 @@ import traceback
 
 try:
     import bpy
-    import math
-    from mathutils import Vector, Matrix
+    import bmesh
+    from math import pi, sin, cos
     
-    # --- CLEAR SCENE ---
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
-    for block in bpy.data.meshes:
-        bpy.data.meshes.remove(block)
-    for block in bpy.data.materials:
-        bpy.data.materials.remove(block)
-    for block in bpy.data.lights:
-        bpy.data.lights.remove(block)
-    for block in bpy.data.images:
-        bpy.data.images.remove(block)
-    for block in bpy.data.curves:
-        bpy.data.curves.remove(block)
+    def clear_scene():
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
     
-    # --- RING PARAMETERS ---
-    inner_radius = 11.0     # mm, inner finger diameter/2
-    band_width = 4.0        # mm, wide band for contemporary look
-    band_thickness = 2.0    # mm, flat cross-section height
-    band_open_angle_deg = 48
-    band_open_angle = math.radians(band_open_angle_deg)
-    segments = 192
+    def create_material(name, color, metallic=1.0, roughness=0.3):
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            if bsdf.inputs.get("Base Color"):
+                bsdf.inputs["Base Color"].default_value = (*color, 1.0)
+            if bsdf.inputs.get("Metallic"):
+                bsdf.inputs["Metallic"].default_value = metallic
+            if bsdf.inputs.get("Roughness"):
+                bsdf.inputs["Roughness"].default_value = roughness
+        return mat
     
-    # --- BUILD OPEN RING BY USING A PROFILE + CURVE ---
-    # 1. Create a rectangle as profile for the band (to be swept)
-    bpy.ops.mesh.primitive_plane_add(size=1)
-    profile = bpy.context.active_object
-    profile.scale = (band_thickness * 0.5, band_width * 0.5, 1)
-    profile.name = "BandProfile"
-    # Center profile so sweeping axis is at rectangle center (origin)
-    bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
-    profile.location = (inner_radius + band_width * 0.5, 0, 0)
-    bpy.ops.object.transform_apply(location=True, scale=True, rotation=True)
+    def create_gem_material():
+        mat = bpy.data.materials.new("Diamond")
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            if bsdf.inputs.get("Base Color"):
+                bsdf.inputs["Base Color"].default_value = (1,1,1,1)
+            if bsdf.inputs.get("Metallic"):
+                bsdf.inputs["Metallic"].default_value = 0.0
+            if bsdf.inputs.get("Roughness"):
+                bsdf.inputs["Roughness"].default_value = 0.04
+            if bsdf.inputs.get("Emission"):
+                bsdf.inputs["Emission"].default_value = (1,1,1,1)
+        return mat
     
-    # 2. Create the curve (arc) the profile will be swept along
-    bpy.ops.curve.primitive_bezier_circle_add(radius=inner_radius + band_width * 0.5)
-    arc = bpy.context.active_object
-    arc.data.splines.clear()
-    curve = arc
-    spline = curve.data.splines.new(type='BEZIER')
-    spline.bezier_points.add(count=1)  # 2 total points
+    def create_split_band_ring():
+        outer_radius = 1.0
+        base_thickness = 0.21
+        top_thickness = 0.13
+        base_width = 0.35
+        top_width = 0.18
+        split_angle = pi/2 * 0.88
     
-    # Calculate arc ends for open ring
-    angle_start = band_open_angle / 2
-    angle_end = 2*math.pi - band_open_angle / 2
+        segs = 64
+        bm = bmesh.new()
+        offset_y = 0.07
+        for split_factor in (-1,1):
+            curve = []
+            for i in range(segs+1):
+                t = i/segs
+                angle = pi/2 + split_factor * split_angle/2 * (1-t)
+                rad = outer_radius
+                x = rad * cos(angle)
+                y = split_factor*offset_y*(1-t)    # band splits near top, close at base
+                z = rad * sin(angle)
+                curve.append((x, y, z))
+            profiles = []
+            for i in range(segs+1):
+                t = i / segs
+                thickness = base_thickness*(1-t) + top_thickness*t
+                width = base_width*(1-t) + top_width*t
+                # profile at XZ around point/angle
+                h = cos(pi/2) # =0, unused, flat across Y for section
+                w = width/2
+                verts = []
+                for j in range(8):
+                    th = (j/(8))*2*pi
+                    px = thickness/2 * cos(th)
+                    py = w * sin(th)
+                    verts.append((curve[i][0]+px, curve[i][1]+py, curve[i][2]))
+                profiles.append(verts)
+            # faces
+            for i in range(segs):
+                for j in range(8):
+                    v0 = bm.verts.new(profiles[i][j])
+                    v1 = bm.verts.new(profiles[i][(j+1)%8])
+                    v2 = bm.verts.new(profiles[i+1][(j+1)%8])
+                    v3 = bm.verts.new(profiles[i+1][j])
+                    bm.faces.new([v0,v1,v2,v3])
+        mesh = bpy.data.meshes.new("GoldRing")
+        bm.to_mesh(mesh)
+        bm.free()
+        ring = bpy.data.objects.new("GoldRing", mesh)
+        bpy.context.collection.objects.link(ring)
+        ring.location = (0,0,-outer_radius)
+        ring.rotation_mode = 'XYZ'
+        ring.rotation_euler = (pi/2,0,0)
+        gold = create_material("Gold", (1.0, 0.85, 0.3))
+        if len(ring.data.materials)==0:
+            ring.data.materials.append(gold)
+        else:
+            ring.data.materials[0]=gold
+        ring.select_set(True)
+        bpy.context.view_layer.objects.active = ring
+        return ring
     
-    points = []
-    for angle in [angle_start, angle_end]:
-        x = math.cos(angle) * (inner_radius + band_width * 0.5)
-        y = math.sin(angle) * (inner_radius + band_width * 0.5)
-        points.append((x, y, 0))
-    spline.bezier_points[0].co = points[0]
-    spline.bezier_points[1].co = points[1]
-    for pt in spline.bezier_points:
-        pt.handle_left_type = pt.handle_right_type = 'VECTOR'
+    def create_oval_gem(center=(0,0,0), rx=0.13, rz=0.20, segs=48):
+        bm = bmesh.new()
+        # oval/girdle row
+        girdle = []
+        for i in range(segs):
+            a = 2*pi*i/segs
+            x = rx*cos(a)
+            y = rx*0.74*sin(a)
+            z = 0
+            girdle.append(bm.verts.new((x, y, z)))
+        top = bm.verts.new((0,0,rz))
+        bottom = bm.verts.new((0,0,-rz*0.6))
+        for i in range(segs):
+            bm.faces.new([girdle[i], top, girdle[(i+1)%segs]])
+        for i in range(segs):
+            bm.faces.new([girdle[i], bottom, girdle[(i+1)%segs]])
+        mesh = bpy.data.meshes.new("OvalGem")
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new("OvalGem", mesh)
+        obj.location = (center[0], center[1], center[2])
+        bpy.context.collection.objects.link(obj)
+        gem_mat = create_gem_material()
+        if len(obj.data.materials)==0:
+            obj.data.materials.append(gem_mat)
+        else:
+            obj.data.materials[0]=gem_mat
+        return obj
     
-    # Smooth open arc
-    curve.data.dimensions = '3D'
-    curve.data.resolution_u = 64
+    def create_prongs(r=1.0, gem_rx=0.13, gem_rz=0.20, n=4):
+        prongs = []
+        prong_radius = 0.025
+        prong_length = 0.14
+        z_gem = r + gem_rz-0.007
+        for i in range(n):
+            ang = pi/2 + i*pi/2
+            px = gem_rx*cos(ang)
+            py = gem_rx*0.74*sin(ang)
+            pz = z_gem
+            root = (px*0.98, py*0.95, pz-gem_rz*0.64)
+            tip = (px, py, pz+gem_rz*0.25)
+            dx,dy,dz = tip[0]-root[0], tip[1]-root[1], tip[2]-root[2]
+            mid = ((tip[0]+root[0])/2, (tip[1]+root[1])/2, (tip[2]+root[2])/2)
+            length = (dx**2+dy**2+dz**2)**0.5
+            bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=prong_radius, depth=length, location=mid)
+            prong = bpy.context.object
+            prong.name = f"Prong_{i+1}"
+            from mathutils import Vector
+            v = Vector((dx,dy,dz)).normalized()
+            up = Vector((0,0,1))
+            if v.dot(up)<0.999999:
+                axis = up.cross(v)
+                ang = up.angle(v)
+                prong.rotation_mode = 'AXIS_ANGLE'
+                prong.rotation_axis_angle[0] = ang
+                prong.rotation_axis_angle[1] = axis[0]
+                prong.rotation_axis_angle[2] = axis[1]
+                prong.rotation_axis_angle[3] = axis[2]
+            gold = create_material("Gold", (1.0, .85, .3))
+            if len(prong.data.materials)==0:
+                prong.data.materials.append(gold)
+            else:
+                prong.data.materials[0]=gold
+            prongs.append(prong)
+        return prongs
     
-    # 3. Sweep profile along arc using Curve modifier
-    profile_mod = profile.modifiers.new('Curve', 'CURVE')
-    profile_mod.object = curve
-    profile_mod.deform_axis = 'POS_X'
-    
-    # 4. Convert swept geometry to mesh (apply all)
-    bpy.context.view_layer.objects.active = profile
-    bpy.ops.object.modifier_apply(modifier='Curve')
-    bpy.ops.object.convert(target='MESH')
-    
-    # 5. Tidy up curve; remove helper
-    bpy.data.objects.remove(curve, do_unlink=True)
-    
-    ring_obj = profile
-    ring_obj.name = "ContemporaryRingBand"
-    
-    # --- POLISHING ---
-    subsurf_mod = ring_obj.modifiers.new("Subdivision", 'SUBSURF')
-    subsurf_mod.levels = 2
-    subsurf_mod.render_levels = 3
-    ring_obj.select_set(True)
-    bpy.context.view_layer.objects.active = ring_obj
-    bpy.ops.object.shade_smooth()
-    
-    # --- GOLD MATERIAL ---
-    gold_mat = bpy.data.materials.new("GoldMaterial")
-    gold_mat.use_nodes = True
-    bsdf = gold_mat.node_tree.nodes.get("Principled BSDF")
-    if bsdf:
-        bsdf.inputs["Base Color"].default_value = (1.0, 0.764, 0.336, 1.0)
-        bsdf.inputs["Metallic"].default_value = 1.0
-        bsdf.inputs["Roughness"].default_value = 0.23
-        bsdf.inputs["Alpha"].default_value = 1.0
-    
-    ring_obj.data.materials.append(gold_mat)
-    
-    # --- BEZEL-SET GEMS ON EACH OPEN END ---
-    gem_radius = 1.14
-    bezel_width = 0.38
-    bezel_height = band_thickness + 0.4
-    gem_segments = 48
-    
-    for i, angle in enumerate([angle_start, angle_end]):
-        # Calculate end center for gem/bezel
-        cx = math.cos(angle) * (inner_radius + band_width * 0.5)
-        cy = math.sin(angle) * (inner_radius + band_width * 0.5)
-        cz = 0
-        base_pos = Vector((cx, cy, cz))
-        normal = Vector((math.cos(angle), math.sin(angle), 0))
-        
-        # -- Create bezel (simple short cylinder, slightly larger than stone)
-        bpy.ops.mesh.primitive_cylinder_add(
-            radius=gem_radius + bezel_width,
-            depth=bezel_height,
-            vertices=gem_segments,
-            location=base_pos + Vector((0,0,bezel_height/2))
-        )
-        bezel = bpy.context.active_object
-        # Rotate to align with band direction
-        bezel.rotation_euler = (0, 0, angle)
-        
-        # Material: Same gold
-        bezel.data.materials.append(gold_mat)
-        bpy.ops.object.shade_smooth()
-    
-        # -- Create gem (diamond/cubic zirconia, clear round)
-        bpy.ops.mesh.primitive_uv_sphere_add(
-            radius=gem_radius,
-            segments=gem_segments,
-            ring_count=gem_segments//2,
-            location=base_pos + Vector((0,0,bezel_height*0.7))
-        )
-        gem = bpy.context.active_object
-    
-        # Material: Diamond
-        diamond_mat = bpy.data.materials.get("DiamondMaterial")
-        if not diamond_mat:
-            diamond_mat = bpy.data.materials.new("DiamondMaterial")
-            diamond_mat.use_nodes = True
-            d_bsdf = diamond_mat.node_tree.nodes.get("Principled BSDF")
-            if d_bsdf:
-                d_bsdf.inputs["Base Color"].default_value = (0.93, 0.97, 1.0, 1.0)
-                d_bsdf.inputs["Metallic"].default_value = 0.05
-                d_bsdf.inputs["Roughness"].default_value = 0.02
-                d_bsdf.inputs["Alpha"].default_value = 1.0
-        gem.data.materials.append(diamond_mat)
-        bpy.ops.object.shade_smooth()
+    clear_scene()
+    ring = create_split_band_ring()
+    gem = create_oval_gem(center=(0,0,1.0+0.20-0.013), rx=0.13, rz=0.20, segs=48)
+    create_prongs(r=1.0, gem_rx=0.13, gem_rz=0.20, n=4)
     
     # ----------------------------
     # RENDER AND EXPORT FOOTER

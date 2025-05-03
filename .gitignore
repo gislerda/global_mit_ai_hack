@@ -4,3 +4,4 @@ venv/
 secrets.toml
 __pycache__/
 *.db
+blender_output/
