@@ -4,7 +4,7 @@ import subprocess
 import uuid
 from pathlib import Path
 import streamlit_3d as sd
-from utils.openai_utils import parse_user_intent, describe_reference_image
+from utils.openai_utils import parse_user_intent, describe_reference_image, create_geometry_from_design
 import base64
 
 st.set_page_config(layout='wide')
@@ -54,13 +54,40 @@ with col1:
     if st.button("Generate Render & Model"):
         out_dir = Path("blender_output")
         out_dir.mkdir(exist_ok=True)
+
+        # Optional: save the JSON design intent (for trace/debugging)
         design_file = out_dir / f"design_{uuid.uuid4().hex}.json"
         with open(design_file, "w") as f:
             json.dump(st.session_state.design_state, f)
-        result = subprocess.run([
-            "blender", "--background", "--python", "render_from_state.py", "--", str(design_file)
-        ])
-        st.success("Render task submitted. Check the Blender output folder.")
+
+        # Get image description (if available)
+        image_description = st.session_state.get("image_description", "")
+
+        # 🔧 Generate Blender geometry script
+        
+        
+        MAX_RETRIES = 2
+        retries = 0
+        success = False
+
+        while retries <= MAX_RETRIES and not success:
+            script_path = create_geometry_from_design(st.session_state.design_state, error_message=None if retries == 0 else last_error)
+
+            result = subprocess.run([
+                "blender", "--background", "--python", str(script_path)
+            ], capture_output=True, text=True)
+            print("Return code:", result.returncode)
+            print("STDOUT:")
+            print(result.stdout)
+            print("STDERR:")
+            print(result.stderr)
+            if result.returncode == 0:
+                success = True
+            else:
+                last_error = result.stderr.strip()
+                retries += 1
+        print(success)
+        st.success("Render & model generation complete.")
 
 # Right: base shape grid and modifications
 with col2:

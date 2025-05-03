@@ -4,7 +4,7 @@ from openai import OpenAI
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
-
+import json
 from supabase import create_client
 import uuid
 from pathlib import Path
@@ -91,3 +91,70 @@ def describe_reference_image(uploaded_file) -> str:
     )
 
     return response.output_parsed.description
+
+def create_geometry_from_design(design, error_message=None) -> str:
+    error = f"Previous attempt failed. Error:\n```\n{error_message}\n```" if error_message else ''
+    geometry_prompt =  f"""
+You are a 3D jewelry designer generating Python code for Blender 4.3+.
+
+Use only the `bpy` Python API to:
+- Clear the scene fully
+- Create a ring with base shape: {design['base_shape']}
+- Use material: {design['material']}, built using the new **Principled BSDF** node
+- Avoid deprecated or invalid BSDF inputs such as:
+  ❌ 'Specular'
+  ❌ 'Transmission'
+  ❌ 'Transmission Roughness'
+  ❌ 'Transmission Ratio'
+
+✅ Use only compatible BSDF inputs in Blender 4.3, such as:
+  - Base Color
+  - Metallic
+  - Roughness
+  - Alpha
+  - Emission (optional for glow)
+
+Add design elements:
+- Gems: {json.dumps(design.get('gems', {}))}
+- Profile: {design.get('profile')}
+- Engravings: {json.dumps(design.get('engravings', {}))}
+- Experimental details: {design.get('experimental') or 'none'}
+⚠️ Use only valid inputs for the Principled BSDF in Blender 4.3. Avoid: 'Transmission', 'Specular', 'Transmission Roughness', 'Transmission Ratio'
+
+{error}
+
+Return ONLY valid executable Python code (no markdown).
+"""
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You're a geometry code generator for Blender. Output a single .py script."},
+            {"role": "user", "content": geometry_prompt}
+        ]
+    )
+    blender_code = response.choices[0].message.content
+    cleaned_code = clean_code_block(blender_code)
+    footer_code = Path(r"./render_and_export_footer.py").read_text()
+    guarded_code = wrap_in_try_block(cleaned_code + "\n\n" + footer_code)
+    code_path = Path(r"./dynamic_geometry.py")
+    code_path.write_text(guarded_code)
+    return code_path
+
+def clean_code_block(text: str) -> str:
+    if text.startswith("```python"):
+        text = text.removeprefix("```python").strip()
+    elif text.startswith("```"):
+        text = text.removeprefix("```").strip()
+    if text.endswith("```"):
+        text = text.removesuffix("```").strip()
+    return text
+
+def wrap_in_try_block(code: str) -> str:
+    return (
+        "import sys\nimport traceback\n\n"
+        "try:\n"
+        + "\n".join(f"    {line}" for line in code.splitlines())
+        + "\nexcept Exception as e:\n"
+        "    traceback.print_exc()\n"
+        "    sys.exit(1)\n"
+    )
