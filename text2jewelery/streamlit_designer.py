@@ -8,7 +8,8 @@ from utils.openai_utils import parse_user_intent, describe_reference_image, crea
 import base64
 
 st.set_page_config(layout='wide')
-
+render_path = "streamlit_3d/frontend/blender_output/ring_render.png"
+glb_path = r"./blender_output/ring_export.glb"
 # State persistence
 if "design_state" not in st.session_state:
     st.session_state.design_state = {
@@ -34,7 +35,7 @@ init_prompt = st.text_area("Prompt", "A classic gold ring with a diamond on top"
 
 uploaded_file = st.file_uploader("Upload a reference image (optional)", type=["jpg", "jpeg", "png"])
 if uploaded_file:
-    st.image(uploaded_file, caption="Uploaded Reference", use_container_width=True)
+    st.image(uploaded_file, caption="Uploaded Reference", width=300)
 
 if st.button("Describe Image with AI"):
     desc = describe_reference_image(uploaded_file)
@@ -88,14 +89,30 @@ if st.button("Generate Render & Model"):
     st.success("Render & model generation complete.")
     # Show generated render
     render_path = "streamlit_3d/frontend/blender_output/ring_render.png"
-    glb_path = "blender_output/ring_export.glb"
-
-    if Path(glb_path).exists():
-        st.markdown("### Final Model")
-        sd.streamlit_3d(model=glb_path, height=500)
+    glb_path = r"./blender_output/ring_export.glb"
 
     if Path(render_path).exists():
         st.image(render_path, caption="🖼️ Final Render", use_container_width=True)
+        with open(render_path, "rb") as img_file:
+            st.download_button(
+                label="⬇️ Download Rendered Image",
+                data=img_file,
+                file_name="ring_render.png",
+                mime="image/png"
+            )
+
+    # Exported 3D Model (GLB)
+    print("GLB path:", glb_path)
+    if Path(glb_path).exists():
+        st.markdown("### Final Model")
+        sd.streamlit_3d(model=glb_path, height=500)
+        with open(glb_path, "rb") as model_file:
+            st.download_button(
+                label="⬇️ Download 3D Model (.glb)",
+                data=model_file,
+                file_name="ring_export.glb",
+                mime="model/gltf-binary"
+            )
 
 if st.button("🔁 Regenerate / Refine"):
 
@@ -132,8 +149,42 @@ if st.button("🔁 Regenerate / Refine"):
             else:
                 st.error("❌ Refinement failed. See console for logs.")
                 st.text(result.stderr)
+if st.button("▶️ Generate Geometry"):
+    rerun_script = Path("dynamic_geometry.py")
+    if not rerun_script.exists():
+        st.error("No previously generated geometry script found.")
+    else:
+        rerun_result = subprocess.run([
+            "blender", "--background", "--python", str(rerun_script)
+        ], capture_output=True, text=True)
 
+        if rerun_result.returncode == 0:
+            st.success("✅ Successfully re-ran the last geometry script.")
+            if Path(render_path).exists():
+                st.image(render_path, caption="🔁 Re-Rendered Image", use_container_width=True)
+            if Path(glb_path).exists():
+                sd.streamlit_3d(model=glb_path.replace("\\", "/"), height=500)
+        else:
+            st.error("❌ Blender re-run failed.")
+            st.text(rerun_result.stderr)
 
+    with open(render_path, "rb") as img_file:
+            st.download_button(
+                label="⬇️ Download Rendered Image",
+                data=img_file,
+                file_name="ring_render.png",
+                mime="image/png"
+            )       
+    if Path(glb_path).exists():
+        st.markdown("### Final Model")
+        sd.streamlit_3d(model=glb_path, height=500)
+        with open(glb_path, "rb") as model_file:
+            st.download_button(
+                label="⬇️ Download 3D Model (.glb)",
+                data=model_file,
+                file_name="ring_export.glb",
+                mime="model/gltf-binary"
+            )
 
 # Show current JSON
 st.markdown("### Current Design State")

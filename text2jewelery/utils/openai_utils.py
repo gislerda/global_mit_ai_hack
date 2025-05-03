@@ -69,29 +69,28 @@ def describe_reference_image(uploaded_file) -> str:
     """
     url = upload_to_supabase(uploaded_file.read(), uploaded_file.name)
     print(f"Uploaded image URL: {url}")
-    response = client.responses.parse(
-        model="gpt-4o",
-        input=[
+    response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a jewelry design assistant. "
-                    "Describe the ring or jewelry piece shown in the image as clearly as possible. "
-                    "Focus on materials, shapes, stone placement, symmetry, and stylistic elements."
-                    "Be as exact as possible in your descsription, trying to structure the description such that it can be easily parsed into code for generating the geometry."
+                    "You are a jewelry design assistant. Describe this image for downstream geometry parsing. "
+                    "Be literal and structured in your language. Describe materials, shape, style, gem placement, and unique features."
                 )
             },
             {
                 "role": "user",
-                "content":  url
-                    
-                
+                "content": [
+                    {"type": "text", "text": "Please describe this jewelry item:"},
+                    {"type": "image_url", "image_url": {"url": url}}
+                ]
             }
-        ],
-        text_format=ImageDescription
+        ]
     )
-    print(f"Image description response: {response.output_parsed.description}")
-    return response.output_parsed.description
+    print(response.choices[0].message.content)
+    
+    return response.choices[0].message.content
 
 def create_geometry_from_design(design, error_message=None, description = "") -> str:
     error = f"Previous attempt failed. Error:\n```\n{error_message}\n```" if error_message else ''
@@ -267,7 +266,9 @@ You previously generated the following geometry code:
 {current_code}
 The resulting image (attached via URL) does not fully match the intended design.
 ---
+IF IT IS NOT A RING, DO NOT USE THE BASE CODE FOR THE RING IN THE CORRECT POSITION (ONLY ADAPT SHAPE AND MATERIALS) AND JUST GENERATE THE REST OF THE GEOMETRY.
 BASE CODE FOR THE RING IN THE CORRECT POSITION (ONLY ADAPT SHAPE AND MATERIALS):
+
 import bpy
 
 def clear_scene():
@@ -370,7 +371,7 @@ DO NOT COMMENT THE CODE! DO NOT ADD ANY EXPLANATIONS INLINE! ONLY ADD EXPLANATIO
     guarded_code = wrap_in_try_block(cleaned_code + "\n\n" + footer_code)
 
     # Write to file
-    script_path = Path("blender_output/dynamic_geometry.py")
+    script_path = Path("./dynamic_geometry.py")
     script_path.write_text(guarded_code)
 
     return script_path

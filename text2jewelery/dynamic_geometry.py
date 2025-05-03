@@ -3,8 +3,7 @@ import traceback
 
 try:
     import bpy
-    import bmesh
-    from math import pi, sin, cos
+    import math
     
     def clear_scene():
         bpy.ops.object.select_all(action='SELECT')
@@ -23,278 +22,144 @@ try:
                 bsdf.inputs["Roughness"].default_value = roughness
         return mat
     
-    def create_gem_material():
-        mat = bpy.data.materials.new("Diamond")
-        mat.use_nodes = True
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-        if bsdf:
-            if bsdf.inputs.get("Base Color"):
-                bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-            if bsdf.inputs.get("Metallic"):
-                bsdf.inputs["Metallic"].default_value = 0.0
-            if bsdf.inputs.get("Roughness"):
-                bsdf.inputs["Roughness"].default_value = 0.02
-            if bsdf.inputs.get("Emission"):
-                bsdf.inputs["Emission"].default_value = (1.0, 1.0, 1.0, 1.0)
-        return mat
-    
-    def band_profile(thickness_base, thickness_top, width):
-        verts = []
-        segs = 8
-        for i in range(segs):
-            t = i / (segs - 1)
-            y = (t - 0.5) * width
-            thickness = (1-t)*thickness_base + t*thickness_top
-            verts.append((0, y, -thickness/2))
-            verts.append((0, y, thickness/2))
-        return verts
-    
-    def swept_curve(radius=1.0, split_angle=pi/2, segs=64):
-        # Returns two lists of points for the split strands
-        a0 = pi/2 + split_angle/2
-        a1 = pi/2 - split_angle/2
-        arc1 = []
-        arc2 = []
-        for i in range(segs+1):
-            t = i / segs
-            a_top = (1-t)*a0 + t*pi*1.5 # go down to base at -Y
-            a_bot = (1-t)*a1 + t*pi*1.5
-            r_top = radius - 0.015 * t
-            r_bot = radius - 0.015 * t
-            arc1.append((r_top*cos(a_top), 0, r_top*sin(a_top)))
-            arc2.append((r_bot*cos(a_bot), 0, r_bot*sin(a_bot)))
-        return arc1, arc2
-    
-    def create_split_band_ring():
-        # Parameters
-        ring_radius = 1.0
-        band_width = 0.32         # width between outer faces of band (XZ plane, vertical ring width)
-        thickness_base = 0.23     # thickness at ring shank (thickest)
-        thickness_top = 0.13      # thickness at stone
-        
-        split_angle = pi/2 * 0.85 /* strands start split over ~77deg */
-    
-        arc1, arc2 = swept_curve(ring_radius, split_angle, segs=80)
-        
-        def profile_verts(a, t):
-            # Cross-section is oval at each point, becomes thinner at top
-            thickness = (1-t)*thickness_base + t*thickness_top
-            width = (1-t)*band_width*1.08 + t*band_width*0.65
-            ring_normal = (cos(a), 0, sin(a))
-            ring_binormal = (0, 1, 0)
-            # 8 verts, distributed along binormal, thickness in normal
-            vs = []
-            for j in range(-3, 4+1):
-                y = (j/4) * width/2
-                for s in [-1,1]:
-                    pt = (
-                        s*thickness/2*ring_normal[0] + 0*ring_binormal[0] + y*ring_binormal[0],
-                        s*thickness/2*ring_normal[1] + 0*ring_binormal[1] + y*ring_binormal[1],
-                        s*thickness/2*ring_normal[2] + 0*ring_binormal[2] + y*ring_binormal[2]
-                    )
-                    vs.append(pt)
-            return vs
-    
-        # Prep BMesh for curve sweep
-        bm = bmesh.new()
-        nsegs = len(arc1)
-        prof_pts = 7*2
-        prev_verts_1 = []
-        prev_verts_2 = []
-    
-        for i in range(nsegs):
-            t = i / (nsegs-1)
-            a1 = pi/2 + split_angle/2*(1-t)
-            a2 = pi/2 - split_angle/2*(1-t)
-            # For both strands (upper and lower)
-            v1 = arc1[i]
-            v2 = arc2[i]
-            mat = (
-                # Matrix: place section at proper spot and orientation (XZ plane tangent)
-                # here: keep ring in XZ, y=0
-                )
-            # Place profile oriented with radial normal
-            pv1s = []
-            pv2s = []
-            pf1 = profile_verts(a1, t)
-            pf2 = profile_verts(a2, t)
-            # The 14 verts of this profile
-            for pt in pf1:
-                pv = bm.verts.new((v1[0]+pt[0], v1[1]+pt[1], v1[2]+pt[2]))
-                pv1s.append(pv)
-            for pt in pf2:
-                pv = bm.verts.new((v2[0]+pt[0], v2[1]+pt[1], v2[2]+pt[2]))
-                pv2s.append(pv)
-    
-            if i > 0:
-                # Create faces for previous profile to this one
-                for j in range(prof_pts):
-                    v00 = prev_verts_1[j]
-                    v01 = prev_verts_1[(j+1)%prof_pts]
-                    v10 = pv1s[j]
-                    v11 = pv1s[(j+1)%prof_pts]
-                    bm.faces.new([v00, v10, v11, v01])
-                    v00 = prev_verts_2[j]
-                    v01 = prev_verts_2[(j+1)%prof_pts]
-                    v10 = pv2s[j]
-                    v11 = pv2s[(j+1)%prof_pts]
-                    bm.faces.new([v00, v01, v11, v10])
-            prev_verts_1 = pv1s
-            prev_verts_2 = pv2s
-    
-        # At the very top, connect the two tops across
-        for i in range(prof_pts):
-            v1 = prev_verts_1[i]
-            v2 = prev_verts_2[i]
-            v1p = prev_verts_1[(i+1)%prof_pts]
-            v2p = prev_verts_2[(i+1)%prof_pts]
-            bm.faces.new([v1, v2, v2p, v1p])
-    
-        # Mesh object
-        mb = bpy.data.meshes.new("GoldRing")
-        bm.to_mesh(mb)
-        bm.free()
-        ring_obj = bpy.data.objects.new("GoldRing", mb)
-        bpy.context.collection.objects.link(ring_obj)
-    
-        gold = create_material("Gold", (1.0, 0.85, 0.3))
-        if len(ring_obj.data.materials) == 0:
-            ring_obj.data.materials.append(gold)
-        else:
-            ring_obj.data.materials[0] = gold
-        ring_obj.select_set(True)
-        bpy.context.view_layer.objects.active = ring_obj
-    
-        # Set correct orientation (XZ ring, top at (0, 0, 0))
-        ring_obj.location = (0, 0, -ring_radius)
-        ring_obj.rotation_euler = (pi/2, 0, 0)
-        ring_obj.rotation_mode = 'XYZ'
-    
-        return ring_obj
-    
-    def create_oval_gem(center=(0, 0, 0.0), rx=0.12, rz=0.17, seg_main=56):
-        # Generate an approximated brilliant oval with vertical facet girdle and a peaked pavilion
-        bm = bmesh.new()
-    
-        n_row = 7
-        top = bm.verts.new((0, 0, rz*1.07))
-        bottom = bm.verts.new((0, 0, -rz*0.67))
-        # girdle (thickest and widest oval)
-        girdle = []
-        for i in range(seg_main):
-            a = (2*pi*i)/seg_main
-            x = rx * cos(a)
-            y = rx*0.86 * sin(a)
-            z = 0
-            v = bm.verts.new((x, y, z))
-            girdle.append(v)
-        # crown (top facets)
-        crown_row = []
-        for i in range(seg_main):
-            a = (2*pi*i)/seg_main
-            x = rx*0.91 * cos(a)
-            y = rx*0.83 * sin(a)
-            z = rz*0.42
-            v = bm.verts.new((x, y, z))
-            crown_row.append(v)
-            # Top to crown row
-            bm.faces.new([top, crown_row[i], crown_row[(i+1)%seg_main]])
-        # Crown facets
-        for i in range(seg_main):
-            bm.faces.new([crown_row[i], girdle[i], girdle[(i+1)%seg_main], crown_row[(i+1)%seg_main]])
-        # Girdle to pavilion (bottom peak)
-        for i in range(seg_main):
-            bm.faces.new([girdle[i], bottom, girdle[(i+1)%seg_main]])
-        mb = bpy.data.meshes.new("OvalGem")
-        bm.to_mesh(mb)
-        bm.free()
-        gem_obj = bpy.data.objects.new("OvalGem", mb)
-        gem_obj.location = center
-        bpy.context.collection.objects.link(gem_obj)
-    
-        gem_mat = create_gem_material()
-        if len(gem_obj.data.materials) == 0:
-            gem_obj.data.materials.append(gem_mat)
-        else:
-            gem_obj.data.materials[0] = gem_mat
-        return gem_obj
-    
-    def create_prongs(ring_radius=1.0, gem_rx=0.12, gem_rz=0.17, nprongs=4):
-        # Prongs are gently flowing posts up from the split band toward the oval edges in X
-        # Place two prongs along +X/-X, two at intermediate ~45deg, symmetrical
-        prong_objs = []
-        z_gem = ring_radius + gem_rz - 0.015
-        angles = [0, pi/2, pi, 3*pi/2]
-        offsets = []
-        # For a natural split-band design, use prong roots tight to strand's top
-        tip_dist = gem_rx*0.90
-        for i in range(nprongs):
-            a = angles[i]
-            x = tip_dist * cos(a)
-            y = tip_dist * sin(a) * 0.78
-            z = z_gem + (sin(a)*0.03)
-            offsets.append((x, y, z))
-        root_dist_band = ring_radius-0.03
-        for i in range(nprongs):
-            a = angles[i]
-            root_x = root_dist_band * cos(a)
-            root_y = root_dist_band * sin(a) * 0.82
-            root_z = ring_radius + 0.02
-            tip = offsets[i]
-            root = (root_x, root_y, root_z)
-            Dx = tip[0] - root[0]
-            Dy = tip[1] - root[1]
-            Dz = tip[2] - root[2]
-            length = (Dx**2 + Dy**2 + Dz**2) ** 0.5
-            # Create prong as gently curved cylinder toward tip
-            bpy.ops.mesh.primitive_cylinder_add(
-                vertices=12,
-                radius=0.018,
-                depth=length,
-                location=((root[0]+tip[0])/2, (root[1]+tip[1])/2, (root[2]+tip[2])/2)
+    def create_curb_chain(center_x=0.0, center_z=1.0, link_count=10, link_major=0.14, link_minor=0.04, gap=0.02):
+        objs = []
+        for i in range(link_count):
+            angle = math.radians(10 * i)
+            link_x = center_x + (i - link_count // 2) * (link_major + gap)
+            link_z = center_z + 0.07 * math.sin(angle)
+            bpy.ops.mesh.primitive_torus_add(
+                major_radius=link_major,
+                minor_radius=link_minor,
+                location=(link_x, 0, link_z),
+                rotation=(1.5708 if i%2==0 else 0, math.radians(45 if i%2==0 else -45), 0)
             )
-            prong = bpy.context.active_object
-            prong.name = f"Prong_{i+1}"
-            # Orient cylinder to the vector (Dx, Dy, Dz)
-            from mathutils import Vector
-            direction = Vector((Dx, Dy, Dz)).normalized()
-            up = Vector((0,0,1))
-            if direction.dot(up) < 0.99999:
-                axis = up.cross(direction)
-                angle = up.angle(direction)
-                prong.rotation_mode = 'AXIS_ANGLE'
-                prong.rotation_axis_angle[0] = angle
-                prong.rotation_axis_angle[1] = axis[0]; prong.rotation_axis_angle[2] = axis[1]; prong.rotation_axis_angle[3] = axis[2]
-            else:
-                prong.rotation_mode = 'XYZ'
-                prong.rotation_euler = (0,0,0)
-            prong_objs.append(prong)
+            link = bpy.context.active_object
+            link.name = f"CurbChainLink_{i:02d}"
+            objs.append(link)
+        return objs
+    
+    def create_dollar_sign_pendant(center_x=0.0, center_z=1.22, height=0.66, thickness=0.10):
+        curve_data = bpy.data.curves.new("DollarSignCurve", type='CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.resolution_u = 48
+        # S-shape Bezier curve like main $
+        bez = curve_data.splines.new('BEZIER')
+        bez.bezier_points.add(3)
+        p = bez.bezier_points
+        h2 = height*0.5
+        w = thickness*1.25
+        p[0].co = (0, 0, -h2)
+        p[0].handle_left = (-w, 0, -h2 - height*0.1)
+        p[0].handle_right = (w, 0, -h2 + height*0.14)
+        p[1].co = (w*0.9, 0, -h2*0.34)
+        p[1].handle_left = (w*2, 0, -h2*0.36)
+        p[1].handle_right = (w*1.2, 0, -h2*0.1)
+        p[2].co = (-w*0.85, 0, h2*0.3)
+        p[2].handle_left = (-w*1.7, 0, h2*0.43)
+        p[2].handle_right = (-w*0.7, 0, h2*0.60)
+        p[3].co = (0, 0, h2)
+        p[3].handle_left = (w*0.2, 0, h2*1.1)
+        p[3].handle_right = (-w*0.2, 0, h2*0.9)
+        curve_data.bevel_depth = thickness*0.5
+        curve_data.bevel_resolution = 24
+        obj = bpy.data.objects.new("DollarSign_S", curve_data)
+        bpy.context.collection.objects.link(obj)
+        obj.location = (center_x, 0, center_z)
+        # Main vertical bar
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(center_x, 0, center_z))
+        vertbar = bpy.context.active_object
+        vertbar.name = "DollarSignBar"
+        vertbar.scale = (0.21*thickness, thickness*0.7, height/2.05)
+        vertbar.location = (center_x, 0, center_z)
+        # Top and bottom bars
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(center_x, 0, center_z + height/2.3))
+        topbar = bpy.context.active_object
+        topbar.name = "DollarSignTop"
+        topbar.scale = (w*1.25, thickness*0.27, thickness*0.20)
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(center_x, 0, center_z - height/2.3))
+        bottombar = bpy.context.active_object
+        bottombar.name = "DollarSignBottom"
+        bottombar.scale = (w*1.25, thickness*0.27, thickness*0.20)
+        # Join all dollar objects
+        bpy.context.view_layer.objects.active = vertbar
+        for o in [obj, topbar, bottombar]:
+            o.select_set(True)
+        vertbar.select_set(True)
+        bpy.ops.object.join()
+        pendant = bpy.context.active_object
+        pendant.name = "DollarSignPendant"
+        # Add ring loop on top for chain
+        bpy.ops.mesh.primitive_torus_add(
+            major_radius=thickness*0.46, minor_radius=thickness*0.15, 
+            location=(center_x, 0, center_z + height*0.53),
+            rotation=(math.radians(90), 0, 0)
+        )
+        loop = bpy.context.active_object
+        loop.name = "PendantLoop"
+        # Join with the dollar sign
+        loop.select_set(True)
+        pendant.select_set(True)
+        bpy.context.view_layer.objects.active = pendant
+        bpy.ops.object.join()
+        # Add decorative engraving: textured bump using voronoi
+        mat = create_material("GoldPendant", (1.0, 0.85, 0.32))
+        mat.use_nodes = True
+        nt = mat.node_tree
+        tex = nt.nodes.new("ShaderNodeTexVoronoi")
+        tex.feature = 'F1'
+        tex.inputs["Scale"].default_value = 36.0
+        bump = nt.nodes.new("ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.22
+        nt.links.new(tex.outputs['Distance'], bump.inputs['Height'])
+        bsdf = nt.nodes.get("Principled BSDF")
+        if bsdf and bsdf.inputs.get("Normal"):
+            nt.links.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+        pendant.data.materials.clear()
+        pendant.data.materials.append(mat)
+        # Add rivet details along vertical bar
+        n_riv = 6
+        for i in range(n_riv):
+            f = (i+0.5)/n_riv
+            rz = center_z + (f-0.5)*height*0.95
+            bpy.ops.mesh.primitive_uv_sphere_add(
+                radius=thickness*0.18, 
+                location=(center_x, 0, rz)
+            )
+            rivet = bpy.context.active_object
+            rivet.name = f"PendantRivet_{i:02d}"
+            rivet.data.materials.append(mat)
+        # Join rivets to pendant
+        for o in bpy.context.selected_objects:
+            o.select_set(False)
+        pendant.select_set(True)
+        for obj_iter in bpy.context.scene.objects:
+            if obj_iter.name.startswith("PendantRivet"):
+                obj_iter.select_set(True)
+        bpy.context.view_layer.objects.active = pendant
+        bpy.ops.object.join()
+        return pendant
+    
+    def create_ring_band():
+        clear_scene()
+        outer_radius = 1.0
+        thickness = 0.2
+        bpy.ops.mesh.primitive_torus_add(
+            major_radius=outer_radius - thickness,
+            minor_radius=thickness,
+            location=(0, 0, -outer_radius),
+            rotation=(1.5708, 0, 0)
+        )
+        ring = bpy.context.active_object
+        ring.name = "GoldRing"
         gold = create_material("Gold", (1.0, 0.85, 0.3))
-        for prong in prong_objs:
-            if len(prong.data.materials) == 0:
-                prong.data.materials.append(gold)
-            else:
-                prong.data.materials[0] = gold
-        return prong_objs
+        ring.data.materials.append(gold)
+        return ring
     
     def main():
-        clear_scene()
-        ring_obj = create_split_band_ring()
-        ring_radius = 1.0
-        gem_rx, gem_rz = 0.12, 0.17
-        # Place diamond so its base sits just above ring top at origin (0,0,0)
-        gem_z = ring_radius + gem_rz - 0.022
-        gem_obj = create_oval_gem(center=(0, 0, gem_z), rx=gem_rx, rz=gem_rz, seg_main=56)
-        create_prongs(ring_radius=ring_radius, gem_rx=gem_rx, gem_rz=gem_rz, nprongs=4)
-        # Optional: set shade smooth
-        for obj in bpy.context.collection.objects:
-            if obj.type == 'MESH':
-                try:
-                    obj.select_set(True)
-                    bpy.context.view_layer.objects.active = obj
-                    bpy.ops.object.shade_smooth()
-                except Exception as e:
-                    pass
+        create_ring_band()
+        create_curb_chain(center_x=0.0, center_z=1.16, link_count=8, link_major=0.15, link_minor=0.036, gap=0.026)
+        create_dollar_sign_pendant(center_x=0.0, center_z=1.22, height=0.66, thickness=0.10)
     
     main()
     

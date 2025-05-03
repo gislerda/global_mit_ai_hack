@@ -3,172 +3,121 @@ import traceback
 
 try:
     import bpy
-    import bmesh
-    from math import pi, sin, cos
+    import math
     
     def clear_scene():
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
     
-    def create_material(name, color, metallic=1.0, roughness=0.3):
+    def create_material(name, color, metallic=1.0, roughness=0.23, alpha=1.0, emission=None):
         mat = bpy.data.materials.new(name)
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
         if bsdf:
-            if bsdf.inputs.get("Base Color"):
+            if 'Base Color' in bsdf.inputs:
                 bsdf.inputs["Base Color"].default_value = (*color, 1.0)
-            if bsdf.inputs.get("Metallic"):
+            if 'Metallic' in bsdf.inputs:
                 bsdf.inputs["Metallic"].default_value = metallic
-            if bsdf.inputs.get("Roughness"):
+            if 'Roughness' in bsdf.inputs:
                 bsdf.inputs["Roughness"].default_value = roughness
+            if 'Alpha' in bsdf.inputs:
+                bsdf.inputs["Alpha"].default_value = alpha
+            if emission is not None and 'Emission' in bsdf.inputs:
+                bsdf.inputs['Emission'].default_value = (*emission, 1.0)
+        if alpha < 1:
+            mat.blend_method = 'BLEND'
         return mat
     
-    def create_gem_material():
-        mat = bpy.data.materials.new("Diamond")
-        mat.use_nodes = True
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-        if bsdf:
-            if bsdf.inputs.get("Base Color"):
-                bsdf.inputs["Base Color"].default_value = (1,1,1,1)
-            if bsdf.inputs.get("Metallic"):
-                bsdf.inputs["Metallic"].default_value = 0.0
-            if bsdf.inputs.get("Roughness"):
-                bsdf.inputs["Roughness"].default_value = 0.04
-            if bsdf.inputs.get("Emission"):
-                bsdf.inputs["Emission"].default_value = (1,1,1,1)
-        return mat
+    def create_stud_base(radius=0.16, thickness=0.10):
+        bpy.ops.mesh.primitive_cylinder_add(
+            radius=radius, 
+            depth=thickness, 
+            location=(0, 0, thickness/2)
+        )
+        stud = bpy.context.active_object
+        stud.name = "StudBase"
+        return stud
     
-    def create_split_band_ring():
-        outer_radius = 1.0
-        base_thickness = 0.21
-        top_thickness = 0.13
-        base_width = 0.35
-        top_width = 0.18
-        split_angle = pi/2 * 0.88
+    def create_gem(radius=0.14, height=0.12):
+        bpy.ops.mesh.primitive_ico_sphere_add(
+            subdivisions=4,
+            radius=radius, 
+            location=(0, 0, height/2 + 0.10)
+        )
+        gem = bpy.context.active_object
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.transform.resize(value=(1,1,0.5))
+        bpy.ops.object.mode_set(mode='OBJECT')
+        gem.location.z = height/2 + 0.10
+        gem.name = "FacetedGem"
+        return gem
     
-        segs = 64
-        bm = bmesh.new()
-        offset_y = 0.07
-        for split_factor in (-1,1):
-            curve = []
-            for i in range(segs+1):
-                t = i/segs
-                angle = pi/2 + split_factor * split_angle/2 * (1-t)
-                rad = outer_radius
-                x = rad * cos(angle)
-                y = split_factor*offset_y*(1-t)    # band splits near top, close at base
-                z = rad * sin(angle)
-                curve.append((x, y, z))
-            profiles = []
-            for i in range(segs+1):
-                t = i / segs
-                thickness = base_thickness*(1-t) + top_thickness*t
-                width = base_width*(1-t) + top_width*t
-                # profile at XZ around point/angle
-                h = cos(pi/2) # =0, unused, flat across Y for section
-                w = width/2
-                verts = []
-                for j in range(8):
-                    th = (j/(8))*2*pi
-                    px = thickness/2 * cos(th)
-                    py = w * sin(th)
-                    verts.append((curve[i][0]+px, curve[i][1]+py, curve[i][2]))
-                profiles.append(verts)
-            # faces
-            for i in range(segs):
-                for j in range(8):
-                    v0 = bm.verts.new(profiles[i][j])
-                    v1 = bm.verts.new(profiles[i][(j+1)%8])
-                    v2 = bm.verts.new(profiles[i+1][(j+1)%8])
-                    v3 = bm.verts.new(profiles[i+1][j])
-                    bm.faces.new([v0,v1,v2,v3])
-        mesh = bpy.data.meshes.new("GoldRing")
-        bm.to_mesh(mesh)
-        bm.free()
-        ring = bpy.data.objects.new("GoldRing", mesh)
-        bpy.context.collection.objects.link(ring)
-        ring.location = (0,0,-outer_radius)
-        ring.rotation_mode = 'XYZ'
-        ring.rotation_euler = (pi/2,0,0)
-        gold = create_material("Gold", (1.0, 0.85, 0.3))
-        if len(ring.data.materials)==0:
-            ring.data.materials.append(gold)
-        else:
-            ring.data.materials[0]=gold
-        ring.select_set(True)
-        bpy.context.view_layer.objects.active = ring
-        return ring
-    
-    def create_oval_gem(center=(0,0,0), rx=0.13, rz=0.20, segs=48):
-        bm = bmesh.new()
-        # oval/girdle row
-        girdle = []
-        for i in range(segs):
-            a = 2*pi*i/segs
-            x = rx*cos(a)
-            y = rx*0.74*sin(a)
-            z = 0
-            girdle.append(bm.verts.new((x, y, z)))
-        top = bm.verts.new((0,0,rz))
-        bottom = bm.verts.new((0,0,-rz*0.6))
-        for i in range(segs):
-            bm.faces.new([girdle[i], top, girdle[(i+1)%segs]])
-        for i in range(segs):
-            bm.faces.new([girdle[i], bottom, girdle[(i+1)%segs]])
-        mesh = bpy.data.meshes.new("OvalGem")
-        bm.to_mesh(mesh)
-        bm.free()
-        obj = bpy.data.objects.new("OvalGem", mesh)
-        obj.location = (center[0], center[1], center[2])
-        bpy.context.collection.objects.link(obj)
-        gem_mat = create_gem_material()
-        if len(obj.data.materials)==0:
-            obj.data.materials.append(gem_mat)
-        else:
-            obj.data.materials[0]=gem_mat
-        return obj
-    
-    def create_prongs(r=1.0, gem_rx=0.13, gem_rz=0.20, n=4):
+    def create_prong_ring(gem_radius, z_top, count=4, prong_height=0.12, prong_radius=0.02):
         prongs = []
-        prong_radius = 0.025
-        prong_length = 0.14
-        z_gem = r + gem_rz-0.007
-        for i in range(n):
-            ang = pi/2 + i*pi/2
-            px = gem_rx*cos(ang)
-            py = gem_rx*0.74*sin(ang)
-            pz = z_gem
-            root = (px*0.98, py*0.95, pz-gem_rz*0.64)
-            tip = (px, py, pz+gem_rz*0.25)
-            dx,dy,dz = tip[0]-root[0], tip[1]-root[1], tip[2]-root[2]
-            mid = ((tip[0]+root[0])/2, (tip[1]+root[1])/2, (tip[2]+root[2])/2)
-            length = (dx**2+dy**2+dz**2)**0.5
-            bpy.ops.mesh.primitive_cylinder_add(vertices=12, radius=prong_radius, depth=length, location=mid)
-            prong = bpy.context.object
-            prong.name = f"Prong_{i+1}"
-            from mathutils import Vector
-            v = Vector((dx,dy,dz)).normalized()
-            up = Vector((0,0,1))
-            if v.dot(up)<0.999999:
-                axis = up.cross(v)
-                ang = up.angle(v)
-                prong.rotation_mode = 'AXIS_ANGLE'
-                prong.rotation_axis_angle[0] = ang
-                prong.rotation_axis_angle[1] = axis[0]
-                prong.rotation_axis_angle[2] = axis[1]
-                prong.rotation_axis_angle[3] = axis[2]
-            gold = create_material("Gold", (1.0, .85, .3))
-            if len(prong.data.materials)==0:
-                prong.data.materials.append(gold)
-            else:
-                prong.data.materials[0]=gold
+        for i in range(count):
+            angle = i * (2*math.pi / count)
+            x = math.cos(angle) * (gem_radius * 0.8)
+            y = math.sin(angle) * (gem_radius * 0.8)
+            loc = (x, y, z_top + prong_height/2)
+            bpy.ops.mesh.primitive_cylinder_add(
+                radius=prong_radius, 
+                depth=prong_height, 
+                location=loc
+            )
+            prong = bpy.context.active_object
+            prong.rotation_euler[0] = 0
+            prong.rotation_euler[1] = 0
+            prong.rotation_euler[2] = angle
             prongs.append(prong)
         return prongs
     
-    clear_scene()
-    ring = create_split_band_ring()
-    gem = create_oval_gem(center=(0,0,1.0+0.20-0.013), rx=0.13, rz=0.20, segs=48)
-    create_prongs(r=1.0, gem_rx=0.13, gem_rz=0.20, n=4)
+    def create_post(length=0.5, radius=0.035, z=0):
+        bpy.ops.mesh.primitive_cylinder_add(
+            radius=radius, 
+            depth=length, 
+            location=(0, 0, -length/2 + z)
+        )
+        post = bpy.context.active_object
+        post.name = "StudPost"
+        return post
+    
+    def create_butterfly_clasp(post_length=0.5, post_radius=0.035, offset_z=0.1):
+        bpy.ops.mesh.primitive_cylinder_add(
+            radius=0.07, 
+            depth=0.11, 
+            location=(0, 0, -post_length - 0.055 + offset_z)
+        )
+        clasp = bpy.context.active_object
+        clasp.name = "ButterflyClasp"
+        return clasp
+    
+    def make_stud_earring(origin=(0,0,0)):
+        stud_origin = origin
+        steel = create_material("Steel", (0.80, 0.82, 0.85), metallic=1.0, roughness=0.22)
+        yellow = create_material("YellowGem", (1.0, 0.95, 0.23), metallic=0.0, roughness=0.07, alpha=0.82, emission=(0.9, 0.8, 0.11))
+        stud_base = create_stud_base()
+        stud_base.data.materials.append(steel)
+        gem = create_gem()
+        gem.data.materials.append(yellow)
+        prongs = create_prong_ring(0.14, 0.22)
+        for prong in prongs:
+            prong.data.materials.append(steel)
+        post = create_post()
+        post.data.materials.append(steel)
+        clasp = create_butterfly_clasp()
+        clasp.data.materials.append(steel)
+        for obj in [stud_base, gem, post, clasp] + prongs:
+            obj.location.x += stud_origin[0]
+            obj.location.y += stud_origin[1]
+            obj.location.z += stud_origin[2]
+    
+    def make_pair():
+        clear_scene()
+        make_stud_earring((0.25, 0, 0))
+        make_stud_earring((-0.25, 0, 0))
+    
+    make_pair()
     
     # ----------------------------
     # RENDER AND EXPORT FOOTER
