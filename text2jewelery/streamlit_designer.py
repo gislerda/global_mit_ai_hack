@@ -4,7 +4,7 @@ import subprocess
 import uuid
 from pathlib import Path
 import streamlit_3d as sd
-from utils.openai_utils import parse_user_intent, describe_reference_image, create_geometry_from_design
+from utils.openai_utils import parse_user_intent, describe_reference_image, create_geometry_from_design, regenerate_geometry_code
 import base64
 
 st.set_page_config(layout='wide')
@@ -47,7 +47,9 @@ with col1:
         st.info(desc)
     
     if st.button("Generate Design"):
-        parsed_intent = parse_user_intent(init_prompt)
+        init_prompt = st.session_state.get("image_description", init_prompt)
+        user_prompt = f"text promt: {init_prompt} \nimage description: {st.session_state.get('image_description', '')}"
+        parsed_intent = parse_user_intent(user_prompt)
         st.session_state.design_state.update(parsed_intent)
         st.success("Design parsed and updated from prompt.")
 
@@ -71,7 +73,7 @@ with col1:
         success = False
 
         while retries <= MAX_RETRIES and not success:
-            script_path = create_geometry_from_design(st.session_state.design_state, error_message=None if retries == 0 else last_error)
+            script_path = create_geometry_from_design(st.session_state.design_state, error_message=None if retries == 0 else last_error, description=image_description)
 
             result = subprocess.run([
                 "blender", "--background", "--python", str(script_path)
@@ -88,6 +90,52 @@ with col1:
                 retries += 1
         print(success)
         st.success("Render & model generation complete.")
+        # Show generated render
+        render_path = "streamlit_3d/frontend/blender_output/ring_render.png"
+        glb_path = "blender_output/ring_export.glb"
+
+        if Path(glb_path).exists():
+            st.markdown("### Final Model")
+            sd.streamlit_3d(model=glb_path, height=500)
+
+        if Path(render_path).exists():
+            st.image(render_path, caption="🖼️ Final Render", use_container_width=True)
+
+    if st.button("🔁 Regenerate / Refine"):
+    
+    # Original design text: use uploaded description or fallback to input prompt
+        design_text = st.session_state.get("image_description", init_prompt)
+
+        # Load the rendered image file (must use 'rb' for Supabase upload)
+        rendered_image_path = Path("streamlit_3d/frontend/blender_output/ring_render.png")
+        if not rendered_image_path.exists():
+            st.error("No render found. Generate the model first.")
+        else:
+            with rendered_image_path.open("rb") as rendered_file:
+                # Current dynamic geometry code
+                current_code = Path(r"./dynamic_geometry.py").read_text()
+
+                # Regenerate geometry script
+                updated_script_path = regenerate_geometry_code(
+                    original_design_text=design_text,
+                    rendered_image_file=rendered_file,
+                    current_code=current_code
+                )
+
+                # Rerun Blender with the updated script
+                result = subprocess.run([
+                    "blender", "--background", "--python", str(updated_script_path)
+                ], capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    st.success("✅ Regenerated and rendered refined model.")
+                    st.image(str(rendered_image_path), caption="🆕 Refined Render", use_container_width=True)
+                    st.markdown("### Updated Model")
+                    st_3d_path = "streamlit_3d/frontend/blender_output/ring_export.glb"
+                    sd.streamlit_3d(model=st_3d_path.replace("\\", "/"), height=500)
+                else:
+                    st.error("❌ Refinement failed. See console for logs.")
+                    st.text(result.stderr)
 
 # Right: base shape grid and modifications
 with col2:

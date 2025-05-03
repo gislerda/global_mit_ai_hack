@@ -8,11 +8,15 @@ import math
 from mathutils import Vector
 from bpy_extras.object_utils import world_to_camera_view
 
-# ----------------------------
-# Setup paths
-# ----------------------------
-glb_path = r"./blender_output/ring_export.glb"
-png_path = r"./blender_output/ring_export.png"
+# Define absolute base path (adjust this to your actual project root)
+PROJECT_ROOT = "C:/Dev/src/global_mit_ai_hack/text2jewelery"
+FRONTEND_EXPORT_DIR = os.path.join(PROJECT_ROOT, "streamlit_3d", "frontend", "blender_output")
+
+# Ensure export dir exists
+os.makedirs(FRONTEND_EXPORT_DIR, exist_ok=True)
+
+glb_path = os.path.join(FRONTEND_EXPORT_DIR, "ring_export.glb")
+png_path = os.path.join(FRONTEND_EXPORT_DIR, "ring_render.png")
 
 # ----------------------------
 # Add camera (if not exists)
