@@ -39,8 +39,7 @@ text2jewelry/
 ### Installation
 
 ```bash
-git clone https://github.com/your-username/ai-jewelry-designer.git
-cd ai-jewelry-designer/text2jewelry
+git clone https://github.com/gislerda/global_mit_ai_hack
 
 python -m venv .venv
 .venv\Scripts\activate  # On Windows
@@ -50,6 +49,7 @@ pip install -r requirements.txt
 ### Run
 
 ```bash
+cd ai-jewelry-designer/text2jewelry
 streamlit run streamlit_designer.py
 ```
 
@@ -61,6 +61,9 @@ Set the following in a `.env` or directly in your shell:
 - `SUPABASE_URL=https://...`
 - `SUPABASE_KEY=...`
 - `SUPABASE_BUCKET=mit-hack`
+
+Set the following in `.streamlit/secrets.toml`:
+- `OPENAI_API_KEY=sk-...`
 
 ## 🧠 AI Usage
 
